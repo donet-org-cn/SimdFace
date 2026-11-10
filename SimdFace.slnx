@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="src/SimdFace/SimdFace.csproj" />
+  <Project Path="src/SimdFace.Cli/SimdFace.Cli.csproj" />
+  <Project Path="src/SimdFace.Imaging/SimdFace.Imaging.csproj" />
+  <Project Path="src/SimdFace.Web/SimdFace.Web.csproj" />
+</Solution>

@@ -1,0 +1,5 @@
+**/bin/
+**/obj/
+.vs/
+models/*.onnx
+models/*.partial

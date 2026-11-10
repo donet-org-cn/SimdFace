@@ -1,0 +1,36 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 8) in;
+layout(set = 0, binding = 0, std430) buffer TensorData { float data[]; };
+layout(push_constant, std430) uniform Parameters {
+    int op, source, destination, weights, bias, auxiliary, extra;
+    int inChannels, inHeight, inWidth, outChannels, outHeight, outWidth;
+    int kernelHeight, kernelWidth, strideY, strideX, padY, padX, groups;
+    float scalar;
+} p;
+
+shared float inputTile[8][16];
+shared float filterTile[8][8];
+
+void main() {
+    int plane = p.outHeight * p.outWidth;
+    int position = int(gl_GlobalInvocationID.x);
+    int channel = int(gl_GlobalInvocationID.y);
+    int lx = int(gl_LocalInvocationID.x);
+    int ly = int(gl_LocalInvocationID.y);
+    float sum = channel < p.outChannels && p.bias >= 0 ? data[p.bias + channel] : 0.0;
+    for (int base = 0; base < p.inChannels; base += 8) {
+        int inputChannel = base + ly;
+        int weightChannel = base + lx;
+        inputTile[ly][lx] = position < plane && inputChannel < p.inChannels
+            ? data[p.source + inputChannel * plane + position] : 0.0;
+        if (lx < 8)
+            filterTile[ly][lx] = channel < p.outChannels && weightChannel < p.inChannels
+                ? data[p.weights + channel * p.inChannels + weightChannel] : 0.0;
+        barrier();
+        for (int k = 0; k < 8; k++)
+            sum += inputTile[k][lx] * filterTile[ly][k];
+        barrier();
+    }
+    if (position < plane && channel < p.outChannels)
+        data[p.destination + channel * plane + position] = sum;
+}

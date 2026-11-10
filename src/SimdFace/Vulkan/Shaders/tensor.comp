@@ -1,0 +1,98 @@
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) buffer TensorData { float data[]; };
+layout(push_constant, std430) uniform Parameters {
+    int op, source, destination, weights, bias, auxiliary, extra;
+    int inChannels, inHeight, inWidth, outChannels, outHeight, outWidth;
+    int kernelHeight, kernelWidth, strideY, strideX, padY, padX, groups;
+    float scalar;
+} p;
+
+shared float denseSums[64];
+
+void main() {
+    int inPlane = p.inHeight * p.inWidth;
+    if (p.op == 12) {
+        int c = int(gl_WorkGroupID.x);
+        int lane = int(gl_LocalInvocationID.x);
+        int length = p.inChannels * inPlane;
+        float sum = 0.0;
+        for (int k = lane; k < length; k += 64)
+            sum += data[p.source + k] * data[p.weights + c * length + k];
+        denseSums[lane] = sum;
+        barrier();
+        for (int step = 32; step > 0; step /= 2) {
+            if (lane < step) denseSums[lane] += denseSums[lane + step];
+            barrier();
+        }
+        if (lane == 0) data[p.destination + c] = denseSums[0] + data[p.bias + c];
+        return;
+    }
+
+    int q = int(gl_GlobalInvocationID.x);
+    int outPlane = p.outHeight * p.outWidth;
+    if (q >= p.outChannels * outPlane) return;
+    int c = q / outPlane;
+    int y = (q % outPlane) / p.outWidth;
+    int x = q % p.outWidth;
+    float value;
+    switch (p.op) {
+        case 0: {
+            int perGroup = p.inChannels / p.groups;
+            int inputStart = c / (p.outChannels / p.groups) * perGroup;
+            int filterStart = p.weights + c * perGroup * p.kernelHeight * p.kernelWidth;
+            int iy = y * p.strideY - p.padY;
+            int ix = x * p.strideX - p.padX;
+            value = p.bias < 0 ? 0.0 : data[p.bias + c];
+            for (int ic = 0; ic < perGroup; ic++) {
+                int channel = p.source + (inputStart + ic) * inPlane;
+                for (int ky = 0; ky < p.kernelHeight; ky++) {
+                    if (iy + ky < 0 || iy + ky >= p.inHeight) continue;
+                    for (int kx = 0; kx < p.kernelWidth; kx++) {
+                        if (ix + kx < 0 || ix + kx >= p.inWidth) continue;
+                        int w = filterStart + (ic * p.kernelHeight + ky) * p.kernelWidth + kx;
+                        value += data[channel + (iy + ky) * p.inWidth + ix + kx] * data[w];
+                    }
+                }
+            }
+            break;
+        }
+        case 1: {
+            float scale = data[p.weights + c] * inversesqrt(data[p.extra + c] + p.scalar);
+            value = data[p.source + q] * scale + (data[p.bias + c] - data[p.auxiliary + c] * scale);
+            break;
+        }
+        case 2:
+            value = data[p.source + q];
+            if (value < 0.0) value *= data[p.weights + c];
+            break;
+        case 3:
+            value = max(0.0, data[p.source + q]);
+            break;
+        case 4: {
+            int i = p.source + c * inPlane + 2 * y * p.inWidth + 2 * x;
+            value = max(max(data[i], data[i + 1]), max(data[i + p.inWidth], data[i + p.inWidth + 1]));
+            break;
+        }
+        case 5:
+            value = data[p.source + c * inPlane + (y / 2) * p.inWidth + x / 2];
+            break;
+        case 6:
+            value = data[p.source + (q % p.inChannels) * inPlane + q / p.inChannels];
+            break;
+        case 7:
+            value = 1.0 / (1.0 + exp(-data[p.source + q]));
+            break;
+        case 8:
+            value = data[p.source + q] + data[p.auxiliary + q];
+            break;
+        case 9:
+            value = data[p.source + q] - p.scalar;
+            break;
+        case 10:
+            value = data[p.source + q] * p.scalar;
+            break;
+        default: return;
+    }
+    data[p.destination + q] = value;
+}
