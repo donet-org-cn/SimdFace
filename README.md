@@ -19,11 +19,11 @@ SimdFace 是面向 .NET 10 的本地人脸检测与 1:1 比对项目。它用 Yu
 dotnet add package SimdFace --version 1.0.0
 ```
 
-核心包接收连续的 RGB24 像素。按下文下载模型权重，再用 `FaceDetector` 和 `FaceRecognizer` 加载。图像解码、CLI 和网页测试台可从源码构建。
+核心包接收连续的 RGB24 像素。用 `FaceDetector` 和 `FaceRecognizer` 加载仓库 `models/` 下的权重。图像解码、CLI 和网页测试台可从源码构建。
 
 ## 快速开始
 
-安装 [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) 和 PowerShell 7，在项目根目录下载权重并构建。脚本会校验模型 SHA-256，已有的有效文件会直接复用。
+安装 [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) 和 PowerShell 7。仓库已包含 YuNet 和 SFace 的固定权重，克隆后即可使用。以下脚本会校验 SHA-256，并在文件缺失或损坏时重新下载。
 
 ```powershell
 pwsh -File ./scripts/Get-Models.ps1

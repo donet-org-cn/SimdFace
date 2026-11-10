@@ -19,11 +19,11 @@ Install the inference library in a .NET 10 project.
 dotnet add package SimdFace --version 1.0.0
 ```
 
-The core library takes tightly packed RGB24 pixels. Follow the model download instructions below and load the weights with `FaceDetector` and `FaceRecognizer`. Build the image decoder, CLI, and web lab from source.
+The core library takes tightly packed RGB24 pixels. Use `FaceDetector` and `FaceRecognizer` to load the weights from the repository’s `models/` directory. Build the image decoder, CLI, and web lab from source.
 
 ## Quick start
 
-Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) and PowerShell 7. From the repository root, download the pinned model weights and build. The download script verifies SHA-256 and reuses valid files.
+Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) and PowerShell 7. The repository includes pinned YuNet and SFace weights. The script below checks their SHA-256 hashes and downloads replacements if either file is missing or invalid.
 
 ```powershell
 pwsh -File ./scripts/Get-Models.ps1
