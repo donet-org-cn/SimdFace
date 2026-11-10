@@ -11,17 +11,31 @@ public readonly record struct DetectedFace(float X, float Y, float Width, float 
 public sealed class FaceDetector
 {
     public const string ModelFileName = "face_detection_yunet_2023mar.onnx";
+    internal const string ModelSha256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4";
     public const float DefaultScoreThreshold = 0.8f;
     private static readonly int[] Strides = [8, 16, 32];
 
     private readonly ModelGraph model;
 
+#if !NETWASM
     public FaceDetector(string modelPath) : this(modelPath, null) { }
 
-    public FaceDetector(string modelPath, VulkanInference? vulkan) => model = new ModelGraph(modelPath,
-        "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4", "input", vulkan,
+    public FaceDetector(string modelPath, VulkanInference? vulkan)
+        : this(ModelGraph.ReadFile(modelPath), modelPath, vulkan) { }
+
+    /// <summary>Loads the pinned ONNX model from memory for CPU inference.</summary>
+    public FaceDetector(ReadOnlySpan<byte> modelBytes) : this(modelBytes, ModelFileName, null) { }
+
+    private FaceDetector(ReadOnlySpan<byte> modelBytes, string label, VulkanInference? vulkan) =>
+        model = new ModelGraph(modelBytes, label,
+        ModelSha256, "input", vulkan,
         "cls_8", "cls_16", "cls_32", "obj_8", "obj_16", "obj_32",
         "bbox_8", "bbox_16", "bbox_32", "kps_8", "kps_16", "kps_32");
+#else
+    internal FaceDetector(ReadOnlySpan<byte> modelBytes) => model = new ModelGraph(modelBytes, "input",
+        "cls_8", "cls_16", "cls_32", "obj_8", "obj_16", "obj_32",
+        "bbox_8", "bbox_16", "bbox_32", "kps_8", "kps_16", "kps_32");
+#endif
 
     /// <summary>Detects faces in tightly packed RGB24 data, highest confidence first.</summary>
     public IReadOnlyList<DetectedFace> Detect(ReadOnlySpan<byte> rgb, int width, int height,
@@ -87,10 +101,30 @@ public sealed class FaceDetector
             }
         }
 
+        var order = new int[candidates.Count];
+        for (int i = 0; i < order.Length; i++)
+            order[i] = i;
+        Array.Sort(order, (left, right) =>
+        {
+            int scoreOrder = candidates[right].Score.CompareTo(candidates[left].Score);
+            return scoreOrder == 0 ? left.CompareTo(right) : scoreOrder;
+        });
+
         var faces = new List<DetectedFace>();
-        foreach (DetectedFace candidate in candidates.OrderByDescending(face => face.Score).Take(5000))
-            if (!faces.Any(face => IntersectionOverUnion(face, candidate) > 0.3f))
+        int count = Math.Min(order.Length, 5000);
+        for (int i = 0; i < count; i++)
+        {
+            DetectedFace candidate = candidates[order[i]];
+            bool overlaps = false;
+            foreach (var face in faces)
+            {
+                overlaps = IntersectionOverUnion(face, candidate) > 0.3f;
+                if (overlaps)
+                    break;
+            }
+            if (!overlaps)
                 faces.Add(candidate);
+        }
         return faces;
     }
 

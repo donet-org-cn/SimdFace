@@ -63,6 +63,7 @@ h3 { flex-shrink: 0; font-size: 14px; }
 .controls label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 .controls input, .controls select { width: 88px; color: #17283c; border: 1px solid #bacbe0; background: #fff; padding: 8px 9px; border-radius: 7px; font: inherit; }
 #threshold { width: 116px; }
+#backend { width: auto; min-width: 146px; }
 .primary { margin-left: auto; color: white; background: var(--blue); padding: 9px 16px; border: 1px solid transparent; border-radius: 8px; font-size: 14px; font-weight: 650; }
 .primary:hover:enabled { background: #123e91; }
 .primary:disabled { background: #e4ebf4; color: #546981; }
@@ -90,3 +91,10 @@ footer { padding: 18px 0 22px; color: var(--muted); font-size: 12px; }
   .dropzone { min-height: 170px; }
   .preview canvas { max-height: 260px; }
 }
+
+.feature-file, .feature-export { padding: 13px 15px; border: 1px solid var(--border); border-radius: 9px; }
+.feature-file { display: grid; gap: 8px; font-size: 13px; font-weight: 650; }
+.feature-file input { min-width: 0; width: 100%; font: inherit; }
+.feature-export { display: grid; gap: 8px; margin-top: 14px; }
+.feature-export textarea { width: 100%; padding: 9px; border: 1px solid var(--border); border-radius: 7px; resize: vertical; }
+.switcher { flex-wrap: wrap; }

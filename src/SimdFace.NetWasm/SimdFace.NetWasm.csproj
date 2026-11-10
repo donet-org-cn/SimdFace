@@ -1,0 +1,21 @@
+<Project Sdk="NetWasm.Sdk/0.11.3">
+  <PropertyGroup>
+    <TargetFramework>netwasm0.1</TargetFramework>
+    <OutputType>JsModule</OutputType>
+    <NetWasmJavaScriptHosts>page</NetWasmJavaScriptHosts>
+    <NetWasmNetworkPolicy>denyAll</NetWasmNetworkPolicy>
+    <NetWasmGarbageCollector>NetWasm</NetWasmGarbageCollector>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <DefineConstants>$(DefineConstants);NETWASM</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../SimdFace/FaceDetector.cs;../SimdFace/FaceRecognizer.cs;../SimdFace/ImageSampling.cs;../SimdFace/Kernels.cs;../SimdFace/ModelGraph.cs"
+             Link="Inference/%(Filename)%(Extension)" />
+    <Content Include="../SimdFace.Web/wwwroot/index.html;../SimdFace.Web/wwwroot/app.js;../SimdFace.Web/wwwroot/app.css;../SimdFace.Browser/wwwroot/backend.js;../SimdFace.Browser/wwwroot/face-worker.mjs;../SimdFace.Browser/wwwroot/host-config.js;../SimdFace.Web/wwwroot/server-api.js"
+             Link="%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="wwwroot/runtime.mjs" Link="runtime.mjs" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../../models/face_detection_yunet_2023mar.onnx;../../models/face_recognition_sface_2021dec.onnx"
+             Link="models/%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

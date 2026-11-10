@@ -1,3 +1,5 @@
+import { analyze, local, ready, server } from './backend.js';
+
 const byId = id => document.getElementById(id);
 const uploads = byId('uploads');
 const run = byId('run');
@@ -5,12 +7,39 @@ const score = byId('score');
 const threshold = byId('threshold');
 const backend = byId('backend');
 const modes = [...document.querySelectorAll('[data-mode]')];
-const maxFileSize = 16 * 1024 * 1024;
-const maxPixels = 24_000_000;
+const maxFileSize = 64 * 1024 * 1024;
+const maxPixels = 64_000_000;
 let mode = 'detect';
 let activeRequest = null;
+let runtimeState = local ? 'loading' : 'ready';
+const featureA = byId('feature-a');
+const featureB = byId('feature-b');
+const featureJson = byId('feature-json');
 const cards = ['照片 A', '照片 B'].map(makeCard);
+const wasmOption = backend.querySelector('[value="wasm"]');
+const gpuOption = backend.querySelector('[value="vulkan"]');
+wasmOption.hidden = wasmOption.disabled = !local;
+byId('backend-control').hidden = !server;
+backend.value = local ? 'wasm' : 'cpu';
+document.querySelectorAll('[data-local-only]').forEach(element => element.hidden = false);
 setMode('detect');
+
+if (local) {
+  byId('engine-label').textContent = 'WASM AOT';
+  const status = byId('wasm-status');
+  status.hidden = false;
+  status.textContent = '正在初始化 WASM…';
+  ready.then(engine => {
+    byId('engine-label').textContent = engine;
+    runtimeState = 'ready';
+    status.textContent = 'WASM 已就绪';
+    refreshRun();
+  }, error => {
+    runtimeState = 'failed';
+    status.textContent = error.message;
+    refreshRun();
+  });
+}
 
 function makeCard(title) {
   const card = byId('upload-template').content.firstElementChild.cloneNode(true);
@@ -54,7 +83,7 @@ function makeCard(title) {
     dropzone.classList.remove('has-image');
     info.textContent = '';
     try {
-      if (file.size > maxFileSize) throw new Error('图片大小超过 16 MiB。');
+      if (file.size > maxFileSize) throw new Error('图片大小超过 64 MiB。');
       let bitmap;
       try {
         bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
@@ -63,7 +92,7 @@ function makeCard(title) {
       }
       try {
         if (current !== revision) return;
-        if (bitmap.width * bitmap.height > maxPixels) throw new Error('图片像素数超过 2400 万。');
+        if (bitmap.width * bitmap.height > maxPixels) throw new Error('图片像素数超过 6400 万。');
         const scale = Math.min(1, 1200 / Math.max(bitmap.width, bitmap.height));
         canvas.width = Math.max(1, Math.round(bitmap.width * scale));
         canvas.height = Math.max(1, Math.round(bitmap.height * scale));
@@ -89,12 +118,22 @@ function makeCard(title) {
 function setMode(next) {
   mode = next;
   const compare = mode === 'compare';
+  const vectors = mode === 'vectors';
+  gpuOption.disabled = vectors;
+  if (vectors && backend.value === 'vulkan') backend.value = 'cpu';
   modes.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.mode === mode)));
   uploads.classList.toggle('compare', compare);
+  uploads.hidden = vectors;
+  byId('feature-files').hidden = !vectors;
   cards[1].card.hidden = !compare;
-  byId('threshold-control').hidden = !compare;
-  threshold.disabled = !compare;
-  byId('mode-description').textContent = compare ? '每张照片各需一张人脸。检测和比对完成后直接给出判断。' : '查看单张照片中的所有检测结果。';
+  byId('threshold-control').hidden = threshold.disabled = !(compare || vectors);
+  byId('score-control').hidden = score.disabled = vectors;
+  byId('mode-description').textContent = {
+    detect: '查看单张照片中的所有检测结果。',
+    compare: '每张照片各需一张人脸。检测和比对完成后直接给出判断。',
+    extract: '从一张照片提取 128 维 SFace 特征。',
+    vectors: '在浏览器或后端 CPU 比较两个特征 JSON 文件。'
+  }[mode];
   resetResults();
 }
 
@@ -105,15 +144,29 @@ function resetResults() {
     overlay.replaceChildren();
     info.textContent = file?.name ?? '';
   });
-  const detail = mode === 'compare' ? '选择两张照片后，点击检测并比对。' : '选择照片后，点击开始检测。';
+  byId('feature-export').hidden = true;
+  featureJson.value = '';
+  const detail = {
+    detect: '选择照片后，点击开始检测。',
+    compare: '选择两张照片后，点击检测并比对。',
+    extract: '选择一张照片后，点击提取特征。',
+    vectors: '选择两个特征 JSON 后，点击比对向量。'
+  }[mode];
   showResult('等待测试', detail);
   refreshRun();
 }
 
 function refreshRun() {
-  const compare = mode === 'compare';
-  run.disabled = Boolean(activeRequest) || !cards[0].file || (compare && !cards[1].file);
-  run.textContent = activeRequest ? '正在处理…' : compare ? '检测并比对 →' : '开始检测 →';
+  const inputsReady = mode === 'vectors' ? featureA.files.length && featureB.files.length
+    : cards[0].file && (mode !== 'compare' || cards[1].file);
+  const inBrowser = backend.value === 'wasm';
+  byId('processing-note').textContent = inBrowser
+    ? '照片与特征仅在浏览器中处理'
+    : '照片与特征发送到所选后端处理';
+  run.disabled = Boolean(activeRequest) || (inBrowser && runtimeState !== 'ready') || !inputsReady;
+  run.textContent = activeRequest ? '正在处理…' : {
+    detect: '开始检测 →', compare: '检测并比对 →', extract: '提取特征 →', vectors: '比对向量 →'
+  }[mode];
 }
 
 function showResult(title, detail, state = 'idle') {
@@ -147,37 +200,46 @@ modes.forEach(button => button.addEventListener('click', () => {
   if (mode !== button.dataset.mode) setMode(button.dataset.mode);
 }));
 [score, threshold].forEach(input => input.addEventListener('input', resetResults));
-backend.addEventListener('change', resetResults);
+[backend, featureA, featureB].forEach(input => input.addEventListener('change', resetResults));
+byId('download-feature').addEventListener('click', () => {
+  const url = URL.createObjectURL(new Blob([featureJson.value], { type: 'application/json' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'simdface-sface.json';
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
 
 byId('tester').addEventListener('submit', async event => {
   event.preventDefault();
   if (run.disabled) return;
   resetResults();
   const compare = mode === 'compare';
+  const vectors = mode === 'vectors';
   const controller = new AbortController();
   activeRequest = controller;
   refreshRun();
-  showResult('正在处理照片', compare ? '正在检测人脸并计算特征相似度。' : '正在检测人脸和五个关键点。');
-  const data = new FormData();
-  data.append('first', cards[0].file);
-  if (compare) data.append('second', cards[1].file);
-  const query = new URLSearchParams({ score: score.value, backend: backend.value });
-  if (compare && threshold.value !== '') query.set('threshold', threshold.value);
+  showResult(vectors ? '正在比较向量' : '正在处理照片',
+    compare || vectors ? '正在计算特征相似度。' : '正在检测人脸和五个关键点。');
+  const first = vectors ? featureA.files[0] : cards[0].file;
+  const second = vectors ? featureB.files[0] : compare ? cards[1].file : undefined;
+  const options = { score: score.value, backend: backend.value, threshold: threshold.value };
+  const began = performance.now();
   try {
-    const response = await fetch(`/api/${mode}?${query}`, {
-      method: 'POST', body: data, headers: { 'X-SimdFace-Request': '1' }, signal: controller.signal
-    });
-    const result = await response.json().catch(() => ({}));
+    const { result, ok, status } = await analyze(mode, first, second, options, controller.signal);
     if (activeRequest !== controller) return;
     result.images?.forEach((image, i) => drawImageResult(image, cards[i]));
-    const device = result.backend === 'vulkan' ? `Vulkan · ${result.deviceName}` : 'CPU';
-    const runtime = `${device} · ${result.elapsedMs} ms`;
-    if (compare && response.status === 422) {
+    const device = result.backend === 'wasm' ? result.deviceName ?? 'WASM'
+      : result.backend === 'vulkan' ? '后端 GPU · ' + result.deviceName : '后端 CPU';
+    const runtime = Number.isFinite(result.decodeMs)
+      ? device + ' · 解码 ' + result.decodeMs + ' ms · 推理 ' + result.elapsedMs + ' ms · 请求 ' + Math.round(performance.now() - began) + ' ms'
+      : device + ' · ' + result.elapsedMs + ' ms';
+    if (compare && status === 422) {
       showResult('无法判断是否为同一人', `${result.message} ${runtime}`, 'uncertain');
       return;
     }
-    if (!response.ok) throw new Error(result.message || `请求失败（HTTP ${response.status}）。`);
-    if (compare) {
+    if (!ok) throw new Error(result.message || `请求失败（HTTP ${status}）。`);
+    if (compare || vectors) {
       const { similarity, threshold, differentThreshold, decision } = result.comparison;
       if (!decision) throw new Error('网页服务需要重启后再比对。');
       const details = `相似度 ${similarity.toFixed(4)} · 同人阈值 ${threshold} · 异人阈值 ${differentThreshold} · ${runtime}`;
@@ -187,6 +249,10 @@ byId('tester').addEventListener('submit', async event => {
         const same = decision === 'same';
         showResult(same ? '模型判断为同一人' : '模型判断为不同人', details, same ? 'success' : 'different');
       }
+    } else if (mode === 'extract') {
+      featureJson.value = JSON.stringify(result.feature, null, 2);
+      byId('feature-export').hidden = false;
+      showResult('已提取 128 维特征', runtime, 'success');
     } else {
       const count = result.images[0].faces.length;
       showResult(count ? `检出 ${count} 张人脸` : '未检出人脸',

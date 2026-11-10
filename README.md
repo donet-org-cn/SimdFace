@@ -1,94 +1,154 @@
 # SimdFace
 
-SimdFace 是一个面向 .NET 10 的本地人脸检测和比对项目。名称延续 `Simd` 加能力名的方式，`Face` 涵盖人脸检测、关键点、对齐和特征提取。
+简体中文 · [English](README.en.md)
 
-## 运行 0.1.0
+SimdFace 是面向 .NET 10 的本地人脸检测与 1:1 比对项目。它用 YuNet 定位人脸和五个关键点，用 SFace 对齐人脸并提取归一化的 128 维特征。你可以在同一个网页切换浏览器 WASM、后端 CPU 和后端 Vulkan GPU，也可以从命令行或 C# 直接调用。
 
-安装 .NET 10 SDK，在项目根目录运行。已有模型时，下载脚本只校验文件。
+## 功能
+
+- **人脸检测**。输出置信度、边界框和五个关键点。网页支持拖拽、预览和叠加标注。
+- **照片比对与特征导出**。比对两张单人照片，或者导出特征 JSON，稍后在同一模型和提取流程下直接比较向量。
+- **多种执行方式**。C# CPU 后端使用 SIMD 和并行卷积，Vulkan 后端把模型算子交给显卡驱动，浏览器可通过官方 .NET WASM AOT 独立运行。
+- **大图处理**。网页支持 JPEG、PNG、WebP，单张最多 64 MiB 和 6400 万像素。托管解码器应用 EXIF 方向，检测坐标映射回校正方向后的原图，SFace 从原图采样。
+
+## 快速开始
+
+安装 [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) 和 PowerShell 7，在项目根目录下载权重并构建。脚本会校验模型 SHA-256，已有的有效文件会直接复用。
 
 ```powershell
-.\scripts\Get-Models.ps1
+pwsh -File ./scripts/Get-Models.ps1
 dotnet restore --locked-mode
-dotnet build -c Release --no-restore
+dotnet build SimdFace.slnx -c Release --no-restore
+```
+
+### 网页测试台
+
+启动 ASP.NET Core 服务，然后打开 [http://127.0.0.1:5088/](http://127.0.0.1:5088/)。
+
+```powershell
+dotnet run -c Release --no-build --project src/SimdFace.Web
+```
+
+在「推理设备」中选择后端 CPU 或后端 GPU（Vulkan）。GPU 路径使用项目内嵌的 SPIR-V，需要兼容的 Vulkan loader 和显卡驱动。解码、图像对齐和输出后处理仍在 CPU 执行。Vulkan 后端面向 64 位 Windows 和 Linux，本文的性能数据来自 Windows 实测。
+
+### 在同一个页面启用浏览器 WASM
+
+安装 `wasm-tools` 工作负载并发布 AOT 资源，再让 ASP.NET Core 同源提供该资源目录和后端 API。
+
+```powershell
+dotnet workload install wasm-tools
+dotnet publish src/SimdFace.Browser -c Release -p:RunAOTCompilation=true
+$simdFaceWasm = Join-Path $PWD 'src/SimdFace.Browser/bin/Release/net10.0/publish/wwwroot'
+dotnet run --project src/SimdFace.Web -c Release -- --urls http://127.0.0.1:5089 --SimdFace:BrowserAssets "$simdFaceWasm"
+```
+
+打开 [统一测试台](http://127.0.0.1:5089/)。浏览器 WASM 在页面打开时初始化，约 37 MiB 的权重在第一次处理照片时加载。浏览器模式在 Web Worker 中处理照片和向量。选择后端时，页面把文件发给本机服务，在结果中分开显示解码、推理和请求耗时。向量比对可在浏览器或后端 CPU 上执行。
+
+纯静态部署可以发布整个 `wwwroot`，包括 `_framework` 和 `models`。本机可用 Python 运行 `python scripts/serve-wasm.py`，用 HTTP 服务该目录。
+
+### 命令行
+
+```powershell
 dotnet run -c Release --no-build --project src/SimdFace.Cli -- detect photo.jpg
-dotnet run -c Release --no-build --project src/SimdFace.Cli -- compare photo-a.jpg photo-b.jpg
+dotnet run -c Release --no-build --project src/SimdFace.Cli -- compare first.jpg second.jpg
+dotnet run -c Release --no-build --project src/SimdFace.Cli -- compare first.jpg second.jpg --backend vulkan
 ```
 
-- `detect` 输出图片宽高、每张人脸的边界框、检测置信度及五个关键点。无脸时 `faces` 为空数组。
-- `compare` 要求每张图片恰好检出一张脸，输出 `similarity`、`threshold` 和 `isMatch`。`similarity` 为 `[-1, 1]` 内的余弦分数。默认阈值 `0.363` 来自 SFace 的 LFW 参考值，部署时需要按业务样本校准。 [OpenCV 模型说明](https://docs.opencv.org/4.x/d0/dd4/tutorial_dnn_face.html)
-- 两条命令都接受 `--models <目录>` 和 `--score <阈值>`。默认从当前工作目录的 `models` 加载权重，最低检测置信度为 `0.8`。比对可用 `--threshold <阈值>` 覆盖默认值。
-- CLI 通过标准输出返回 JSON。文件、参数或比对的人脸数量有误时，通过标准错误输出原因并返回退出码 `2`。
+`detect` 返回图片宽高、检测框、五个关键点和置信度。无脸时 `faces` 为空数组。`compare` 要求两张图各检出一张脸，输出 `similarity`、`threshold` 和 `isMatch`。两条命令都支持 `--models`、`--score` 和 `--backend cpu|vulkan`，默认检测阈值为 `0.8`。比对可用 `--threshold` 指定阈值。输入错误写入标准错误并返回退出码 `2`。
 
-CLI 通过 SimdCodecs 解码照片并应用 EXIF 方向，支持已注册的 JPEG、PNG、WebP 等格式。检测把长边限制在 640 像素以内，再将坐标映射回解码后的原尺寸。SFace 在原尺寸图像上采样五点对齐后的 `112 × 112` 人脸，生成归一化的 128 维向量。 [SimdCodecs](https://github.com/sdcb/SimdCodecs)
+## 比对流程与阈值
 
-## 网页测试台
+YuNet 检测输入的长边最多为 640 像素。SFace 将原图人脸对齐为 `112 × 112`，输出归一化特征。CLI 默认使用一次对齐裁剪，阈值 `0.363` 来自 SFace 的 LFW 基准。网页使用三种裁剪及其镜像共六次提取，合并后归一化。网页默认同人阈值为 `0.68`，低于 `0.363` 判为不同人，中间显示无法确认。调低同人阈值会同时影响同人通过率和误认率，部署时应按实际样本校准。 [OpenCV SFace 基准](https://docs.opencv.org/4.x/d0/dd4/tutorial_dnn_face.html)
 
-从项目根目录启动 ASP.NET Core 网页版，再打开 [本机测试台](http://127.0.0.1:5088/)。
+特征 JSON 带有模型和提取流程标识。网页导出的六裁剪特征使用 `sface-2021dec` 和 `align5-6crop-v1`，可在浏览器与后端 CPU 间互用。
 
-```powershell
-.\scripts\Get-Models.ps1
-dotnet run -c Release --project src/SimdFace.Web
-```
+### 在 C# 中调用
 
-- **单图检测**在照片上叠加检测框和五个关键点，同时显示人脸数量与置信度。
-- **推理设备**可在 CPU 和 Vulkan 间切换。同一批照片可以直接重跑对照，结果会显示本次使用的设备和推理用时。
-- **双图比对**点击「检测并比对」后直接给出模型判断。每张照片需要恰好检出一张脸。默认相似度达到 `0.68` 时判断为同一人，低于 `0.363` 时判断为不同人，中间显示无法确认。同人阈值可调整。调至 `0.363` 或更低会取消无法确认区间。
-- 网页对每张脸使用原始对齐裁剪、两个相近缩放裁剪，以及三者的左右镜像。六次 SFace 推理结果相加后归一化，仍得到 128 维向量。应用内可通过 `FaceRecognizer.EmbedForVerification` 使用同一流程。比对耗时会随推理次数增加。
-- `0.68` 是网页为降低亲属误匹配设置的保守默认值。提高同人阈值也会让更多真实同人照片进入无法确认区间。余弦相似度是模型分数，长相相似的人仍可能获得高分。 [SFace 的基准阈值](https://docs.opencv.org/4.x/d0/dd4/tutorial_dnn_face.html)
-- 可选择或拖入 JPG、PNG、WebP，每张最多 16 MiB 和 2400 万像素。检测和比对在本机 C# 服务中运行，照片只在内存中处理。
-- 如果端口被占用，在启动命令末尾追加 `-- --urls http://127.0.0.1:5089` 并打开对应地址。
-
-在本机用同一套 C# 检测和对齐流程对照单次提取与增强提取。AT&T 的 400 张照片按身份分成四组，组内得到 1,800 对同人和 18,000 对异人。统一采用 `0.68` 时，明确判对的同人从 1,601 对增加到 1,649 对，两版在异人组均为 0 对误匹配。旧网页用 `0.60` 明确判对 1,711 对同人。 [AT&T Database of Faces](https://www.cl.cam.ac.uk/research/dtg/attarchive/facedatabase.html)
-
-KinFaceW-I 的 533 对父母与子女照片中有 532 对通过单脸检测。旧网页将 2 对判为同一人，增强提取配合 `0.68` 后为 0 对。其中 116 对母子照片在选定阈值后单独复核。该结果覆盖本次数据中的父母与子女。 [KinFaceW-I](https://www.kinfacew.com/datasets.html)
-
-## Vulkan 加速
-
-Vulkan 把 YuNet 和 SFace 的计算图提交给系统显卡驱动，输入图像的解码、对齐和输出后处理仍在 CPU 上完成。权重和中间张量保存在显存中。运行使用项目内嵌的 SPIR-V，不需要安装着色器编译器。当前 Vulkan 后端面向 64 位 Windows 和 Linux，本次实测在 Windows 完成。命令行可在 `detect` 或 `compare` 后添加 `--backend vulkan`。
-
-本机 GTX 1050 Ti（驱动 560.94）在预热后，对每种工作负载、每个后端分别运行 24 次。检测使用两张公开样图和其中一张的放大版本，比对包括同人、异人和不同尺寸的照片。下表使用网页返回的 `elapsedMs`，包含检测、对齐、模型计算与后处理，计时从图片解码完成后开始。
-
-| 网页操作 | CPU P50 / P95 | Vulkan P50 / P95 | P50 加速比 |
-| --- | ---: | ---: | ---: |
-| 单图检测 | 37 / 69 ms | 9 / 24 ms | 4.1 倍 |
-| 双图增强比对 | 713 / 794 ms | 121.5 / 139 ms | 5.9 倍 |
-
-本次样图中，CPU 和 Vulkan 的人脸数与比对结论一致，框和关键点的最大坐标差为 `0.00014` 像素，余弦相似度最大差为 `0.0000043`。
-
-修改 GLSL 时，可以用 Khronos glslang 重新生成两个着色器。 [Khronos glslang](https://github.com/KhronosGroup/glslang)
-
-```powershell
-foreach ($name in 'tensor', 'pointwise') {
-    glslang -V --target-env vulkan1.0 -Os -o "src/SimdFace/Vulkan/Shaders/$name.spv" "src/SimdFace/Vulkan/Shaders/$name.comp"
-}
-```
-
-## 在 C# 中调用
-
-核心库只依赖 .NET，可接收调用方提供的连续 RGB24 像素。模型实例可复用。
+引用 [核心项目](src/SimdFace/SimdFace.csproj) 和 [图像解码项目](src/SimdFace.Imaging/SimdFace.Imaging.csproj)。已有连续 RGB24 像素时可直接调用核心库。
 
 ```csharp
+using System.IO;
+using System.Linq;
 using SimdFace;
+using SimdFace.Imaging;
 
 var detector = new FaceDetector(Path.Combine("models", FaceDetector.ModelFileName));
 var recognizer = new FaceRecognizer(Path.Combine("models", FaceRecognizer.ModelFileName));
 
-var faceA = detector.Detect(rgbA, widthA, heightA).Single();
-var faceB = detector.Detect(rgbB, widthB, heightB).Single();
-float[] embeddingA = recognizer.Embed(rgbA, widthA, heightA, faceA.Landmarks);
-float[] embeddingB = recognizer.Embed(rgbB, widthB, heightB, faceB.Landmarks);
-float similarity = FaceRecognizer.CosineSimilarity(embeddingA, embeddingB);
+float[] Embed(string path)
+{
+    var image = ImageDecoder.ReadFile(path);
+    var face = detector.Detect(image.Rgb, image.Width, image.Height).Single();
+    return recognizer.EmbedForVerification(image.Rgb, image.Width, image.Height, face.Landmarks);
+}
+
+float similarity = FaceRecognizer.CosineSimilarity(Embed("first.jpg"), Embed("second.jpg"));
 ```
 
-## 模型与范围
+### HTTP API
 
-首版支持 CPU 单图检测和本地 1:1 比对。卷积及向量点积使用 `System.Numerics.Vector<float>`，并提供标量路径。ONNX 解析和模型推理均由 C# 实现，支持下列两份固定权重，加载前校验 SHA-256。运行需要 .NET 和模型文件，无需安装 Python、OpenCV 或 ONNX Runtime。
+`POST /api/detect`、`/api/compare`、`/api/extract` 和 `/api/vectors` 接受 `multipart/form-data`，请求头为 `X-SimdFace-Request: 1`。单文件用 `first`，双文件用 `first` 和 `second`。照片接口支持查询参数 `backend=cpu|vulkan` 和 `score`，比对接口支持 `threshold`。双图比对逐张解码，复用同一块原图 RGB24 缓冲区。
 
-| 权重 | 用途 | 上游来源与许可证 |
+## 性能实测
+
+Windows、NVIDIA GeForce RTX 3060，使用约 2447 万和 1258 万像素的 JPEG 预热后交错测量 12 轮。表格为中位数，单位毫秒。单图检测使用第一张。推理包含检测、对齐、特征提取和后处理，请求还包含本机上传、解码和响应。
+
+| 操作 | 后端 | 解码 | 推理 | 请求 |
+| --- | --- | ---: | ---: | ---: |
+| 单图检测 | CPU | 168.0 | 129.0 | 358.8 |
+| 单图检测 | Vulkan | 144.5 | 60.5 | 269.0 |
+| 双图比对 | CPU | 175.5 | 829.0 | 1034.5 |
+| 双图比对 | Vulkan | 204.0 | 221.5 | 490.8 |
+
+CPU 在卷积输出可复用时原地执行 ReLU。Vulkan 把每张脸的六个裁剪合并成一次提交。本轮改动后，CPU 双图请求从 1503.1 ms 降到 1034.5 ms，Vulkan 双图推理从 240.5 ms 降到 221.5 ms，请求时间从 463.4 ms 变为 490.8 ms。测试中的检测结果一致，各后端的比对分数保留四位小数均为 `0.6345`。
+
+## 可选构建与评测
+
+### NetWasm
+
+独立的 `SimdFace.NetWasm` 项目使用 NetWasm SDK 0.11.3，复用 C# 推理内核。Web Worker 使用浏览器解码和校正 EXIF 方向，再分块传入原图 RGB24。模型在宿主侧进行 SHA-256 校验，NetWasm 客体的网络权限为 `denyAll`。两条浏览器路径共用界面。 [NetWasm 互操作文档](https://github.com/zion-sati/NetWasm/blob/main/docs/javascript-interop.md)
+
+```powershell
+dotnet publish src/SimdFace.NetWasm -c Release
+python scripts/serve-wasm.py src/SimdFace.NetWasm/bin/Release/netwasm0.1/publish
+```
+
+使用 localhost 或 HTTPS，静态部署时发布整个 `publish` 目录。Edge 实测通过 EXIF 旋转 JPEG、PNG、WebP 和 `8000 × 8000` JPEG 特征提取。无损 PNG 和 WebP 样本在两套浏览器运行时产生逐位一致的 Float32 特征。JPEG 解码路径不同，可能让输入像素和分数产生小幅差异。
+
+### 离线模型对照
+
+[评测脚本](benchmarks/compare-face-models.py) 通过 ONNX Runtime CPU 对照 SFace 和 EdgeFace-XXS，共用 YuNet 检测及单次对齐裁剪。它用 AT&T 身份 1–20 的异人对在 0.1% 目标误认率下校准阈值，再测试身份 21–40，并可用 KinFaceW-I 另测亲属误认。 [AT&T 数据](https://www.cl.cam.ac.uk/research/dtg/attarchive/facedatabase.html) · [KinFaceW-I](https://www.kinfacew.com/download.html) · [EdgeFace 权重](https://github.com/yakhyo/edgeface-onnx/releases/tag/weights)
+
+```powershell
+python -m pip install opencv-python-headless==4.13.0.92 numpy==2.4.4 onnxruntime==1.24.3
+python benchmarks/compare-face-models.py --att-zip att_faces.zip --edgeface edgeface_xxs.onnx --kinface-zip KinFaceW-I.zip
+```
+
+| 模型 | AT&T 同人通过 | AT&T 异人误认 | KinFaceW-I 亲属误认 | 单张特征 P50 |
+| --- | ---: | ---: | ---: | ---: |
+| SFace | 900 / 900 | 0 / 19,000 | 24 / 533 | 10.2 ms |
+| EdgeFace-XXS | 900 / 900 | 23 / 19,000 | 33 / 533 | 2.3 ms |
+
+这组结果来自本机四线程、单裁剪评测。网页六裁剪流程使用独立的同人阈值。
+
+## 项目结构
+
+| 项目 | 职责 |
+| --- | --- |
+| [SimdFace](src/SimdFace) | 固定模型的 C# ONNX 解析、CPU SIMD、Vulkan、对齐及向量比对 |
+| [SimdFace.Imaging](src/SimdFace.Imaging) | 纯托管 SimdCodecs 解码及 EXIF 方向校正 |
+| [SimdFace.Cli](src/SimdFace.Cli) | 检测和比对命令 |
+| [SimdFace.Web](src/SimdFace.Web) | ASP.NET Core 测试台、HTTP API 和统一静态托管 |
+| [SimdFace.Browser](src/SimdFace.Browser) | 官方 .NET WASM AOT 浏览器构建 |
+| [SimdFace.NetWasm](src/SimdFace.NetWasm) | 独立的 NetWasm 浏览器构建 |
+
+## 模型与许可证
+
+运行时支持两份固定权重。CPU 推理所需的 ONNX 算子由 C# 实现，离线模型评测另外使用 Python、OpenCV 和 ONNX Runtime。
+
+| 权重 | 用途 | 上游和许可证 |
 | --- | --- | --- |
-| `face_detection_yunet_2023mar.onnx` | 人脸框与五点定位 | [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) · [MIT](models/YuNet.LICENSE.txt) |
-| `face_recognition_sface_2021dec.onnx` | 128 维人脸向量 | [SFace](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) · [Apache-2.0](models/SFace.LICENSE.txt) |
+| `face_detection_yunet_2023mar.onnx` | 人脸检测和五点定位 | [OpenCV Zoo YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) · [MIT](models/YuNet.LICENSE.txt) |
+| `face_recognition_sface_2021dec.onnx` | 128 维人脸特征 | [OpenCV Zoo SFace](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) · [Apache-2.0](models/SFace.LICENSE.txt) |
 
-`SimdFace` 是核心库，`SimdFace.Cli` 和 `SimdFace.Web` 共用 `SimdFace.Imaging` 的图片解码。SimdYolo 的纯托管推理是架构参考，SimdSkia 可作为桌面渲染层。 [SimdYolo](https://github.com/hnlyf168/SimdYolo) · [SimdSkia](https://github.com/donet-org-cn/SimdSkia)
-
-SimdFace 源码采用 [MIT 许可证](LICENSE)。下载的模型权重及借用的 Vulkan 绑定适用各自的许可证。 [Vulkan 绑定许可证](src/SimdFace/Vulkan/SimdSkia.LICENSE.txt)
+源码采用 [MIT 许可证](LICENSE)。图像解码使用 [SimdCodecs](https://github.com/sdcb/SimdCodecs)，借用的 Vulkan 绑定遵循 [SimdSkia 许可证](src/SimdFace/Vulkan/SimdSkia.LICENSE.txt)。相关项目包括 [SimdYolo](https://github.com/donet-org-cn/SimdYolo) 和 [SimdSkia](https://github.com/donet-org-cn/SimdSkia)。

@@ -1,11 +1,13 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json;
 using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.Net.Http.Headers;
 using SimdFace;
 using SimdFace.Imaging;
 
-const int maxFileBytes = 16 * 1024 * 1024;
+const int maxFileBytes = ImageDecoder.MaxFileBytes;
 const float defaultSamePersonThreshold = 0.68f;
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 2 * maxFileBytes + 64 * 1024);
@@ -31,10 +33,31 @@ var gpu = new Lazy<VulkanModels>(() =>
 using var inferenceSlot = new SemaphoreSlim(1);
 
 var app = builder.Build();
-app.UseDefaultFiles();
-app.UseStaticFiles();
-app.MapPost("/api/detect", (HttpRequest request) => Analyze(request, compare: false));
-app.MapPost("/api/compare", (HttpRequest request) => Analyze(request, compare: true));
+using var browserFiles = OpenBrowserAssets(builder.Configuration["SimdFace:BrowserAssets"], app.Environment.ContentRootPath);
+if (browserFiles is null)
+{
+    app.UseDefaultFiles();
+    app.UseStaticFiles();
+}
+else
+{
+    app.Map("/host-config.js", branch => branch.Run(async context =>
+    {
+        context.Response.ContentType = "text/javascript";
+        context.Response.Headers.CacheControl = "no-store";
+        await context.Response.WriteAsync("export const server = true;", context.RequestAborted);
+    }));
+    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = browserFiles });
+    var types = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
+    types.Mappings[".mjs"] = "text/javascript";
+    types.Mappings[".wasm"] = "application/wasm";
+    types.Mappings[".onnx"] = "application/octet-stream";
+    app.UseStaticFiles(new StaticFileOptions { FileProvider = browserFiles, ContentTypeProvider = types });
+}
+app.MapPost("/api/detect", (HttpRequest request) => Analyze(request, PhotoMode.Detect));
+app.MapPost("/api/compare", (HttpRequest request) => Analyze(request, PhotoMode.Compare));
+app.MapPost("/api/extract", (HttpRequest request) => Analyze(request, PhotoMode.Extract));
+app.MapPost("/api/vectors", CompareVectors);
 try
 {
     app.Run();
@@ -45,7 +68,7 @@ finally
         gpu.Value.Device.Dispose();
 }
 
-async Task<IResult> Analyze(HttpRequest request, bool compare)
+async Task<IResult> Analyze(HttpRequest request, PhotoMode mode)
 {
     if (request.Headers["X-SimdFace-Request"] != "1")
         return Results.BadRequest(new { Message = "缺少请求标记。" });
@@ -60,56 +83,64 @@ async Task<IResult> Analyze(HttpRequest request, bool compare)
 
     try
     {
+        bool compare = mode == PhotoMode.Compare;
         float score = ReadThreshold(request, "score", FaceDetector.DefaultScoreThreshold, 0);
         if (score == 0)
             throw new InvalidDataException("检测阈值必须大于 0。");
         float threshold = compare ? ReadThreshold(request, "threshold", defaultSamePersonThreshold, -1) : 0;
-        var images = await ReadImages(request, compare ? 2 : 1, cancellation);
+        var files = await ReadFiles(request, compare ? 2 : 1, maxFileBytes, cancellation);
+        var images = new ImageUpload[files.Length];
+        for (int i = 0; i < files.Length; i++)
+            images[i] = InspectImage(files[i], i == 0 ? "照片 A" : "照片 B");
+
         var gpuModels = backend == "vulkan" ? gpu.Value : null;
         var activeDetector = gpuModels?.Detector ?? detector;
         var activeRecognizer = gpuModels?.Recognizer ?? recognizer;
-        string? deviceName = gpuModels?.Device.DeviceName;
-        var timer = Stopwatch.StartNew();
-        var detections = new ImageResult[images.Count];
-        for (int i = 0; i < images.Count; i++)
+        var timer = new Stopwatch();
+        var decodeTimer = new Stopwatch();
+        var detections = new ImageResult[images.Length];
+        // Keep only one decoded photo, including during full-resolution face alignment.
+        var rgbBuffer = new byte[images.Max(image => image.RgbLength)];
+        var embeddings = new float[]?[images.Length];
+        for (int i = 0; i < images.Length; i++)
         {
             cancellation.ThrowIfCancellationRequested();
             var image = images[i];
-            detections[i] = new ImageResult(image.Width, image.Height, activeDetector.Detect(image.Rgb, image.Width, image.Height, score));
+            var rgb = rgbBuffer.AsSpan(0, image.RgbLength);
+            decodeTimer.Start();
+            Decode(image, rgb, cancellation);
+            decodeTimer.Stop();
+
+            timer.Start();
+            var faces = activeDetector.Detect(rgb, image.Width, image.Height, score);
+            detections[i] = new ImageResult(image.Width, image.Height, faces);
+            if (mode != PhotoMode.Detect && faces.Count == 1 && (i == 0 || embeddings[0] is not null))
+                embeddings[i] = activeRecognizer.EmbedForVerification(rgb, image.Width, image.Height, faces[0].Landmarks, cancellation);
+            timer.Stop();
         }
 
-        if (!compare)
-            return Results.Ok(new { Images = detections, ElapsedMs = timer.ElapsedMilliseconds, Backend = backend, DeviceName = deviceName });
-
-        if (detections.Any(image => image.Faces.Count != 1))
-            return Results.UnprocessableEntity(new
-            {
-                Message = $"比对要求每张图恰好一张脸。照片 A 检出 {detections[0].Faces.Count} 张，照片 B 检出 {detections[1].Faces.Count} 张。",
-                Images = detections,
-                ElapsedMs = timer.ElapsedMilliseconds,
-                Backend = backend,
-                DeviceName = deviceName
-            });
-
-        float[] Embed(int index)
+        string? message = null;
+        FeatureVector? feature = null;
+        ComparisonResult? comparison = null;
+        timer.Start();
+        if (compare)
         {
-            cancellation.ThrowIfCancellationRequested();
-            var image = images[index];
-            return activeRecognizer.EmbedForVerification(image.Rgb, image.Width, image.Height, detections[index].Faces[0].Landmarks, cancellation);
+            if (embeddings[0] is { } first && embeddings[1] is { } second)
+                comparison = Compare(first, second, threshold);
+            else
+                message = $"比对要求每张图恰好一张脸。照片 A 检出 {detections[0].Faces.Count} 张，照片 B 检出 {detections[1].Faces.Count} 张。";
+        }
+        else if (mode == PhotoMode.Extract)
+        {
+            if (embeddings[0] is { } values)
+                feature = new FeatureVector(FaceRecognizer.ModelId, FaceRecognizer.VerificationPipelineId, values);
+            else
+                message = $"提取特征要求恰好一张脸，检出了 {detections[0].Faces.Count} 张。";
         }
 
-        float similarity = FaceRecognizer.CosineSimilarity(Embed(0), Embed(1));
-        float differentThreshold = Math.Min(FaceRecognizer.ReferenceThreshold, threshold);
-        bool isMatch = similarity >= threshold;
-        string decision = isMatch ? "same" : similarity < differentThreshold ? "different" : "uncertain";
-        return Results.Ok(new
-        {
-            Images = detections,
-            ElapsedMs = timer.ElapsedMilliseconds,
-            Backend = backend,
-            DeviceName = deviceName,
-            Comparison = new { Similarity = similarity, Threshold = threshold, DifferentThreshold = differentThreshold, IsMatch = isMatch, Decision = decision }
-        });
+        var result = new AnalysisResult(detections, timer.ElapsedMilliseconds, decodeTimer.ElapsedMilliseconds,
+            backend, gpuModels?.Device.DeviceName, feature, comparison, message);
+        return message is null ? Results.Ok(result) : Results.UnprocessableEntity(result);
     }
     catch (Exception error) when (backend == "vulkan" && error is (NotSupportedException or InvalidOperationException))
     {
@@ -125,37 +156,111 @@ async Task<IResult> Analyze(HttpRequest request, bool compare)
     }
 }
 
-static async Task<List<RgbImage>> ReadImages(HttpRequest request, int count, CancellationToken cancellation)
+static async Task<IResult> CompareVectors(HttpRequest request)
+{
+    if (request.Headers["X-SimdFace-Request"] != "1")
+        return Results.BadRequest(new { Message = "缺少请求标记。" });
+
+    try
+    {
+        float threshold = ReadThreshold(request, "threshold", defaultSamePersonThreshold, -1);
+        var files = await ReadFiles(request, 2, 16 * 1024, request.HttpContext.RequestAborted);
+        var timer = Stopwatch.StartNew();
+        var comparison = Compare(ReadFeature(files[0].Span), ReadFeature(files[1].Span), threshold);
+        return Results.Ok(new { Backend = "cpu", ElapsedMs = timer.ElapsedMilliseconds, Comparison = comparison });
+    }
+    catch (Exception error) when (error is InvalidDataException or ArgumentException or JsonException)
+    {
+        return Results.BadRequest(new { Message = error is JsonException ? "特征 JSON 格式无效。" : error.Message });
+    }
+}
+
+static float[] ReadFeature(ReadOnlySpan<byte> data)
+{
+    var feature = JsonSerializer.Deserialize<FeatureVector>(data, JsonSerializerOptions.Web);
+    if (feature?.Model != FaceRecognizer.ModelId || feature.Pipeline != FaceRecognizer.VerificationPipelineId ||
+        feature.Values?.Length != FaceRecognizer.EmbeddingSize)
+        throw new InvalidDataException("请选择由当前 SFace 提取流程导出的 128 维 JSON 特征。");
+    return feature.Values;
+}
+
+static ComparisonResult Compare(float[] first, float[] second, float threshold)
+{
+    float similarity = FaceRecognizer.CosineSimilarity(first, second);
+    float differentThreshold = Math.Min(FaceRecognizer.ReferenceThreshold, threshold);
+    bool isMatch = similarity >= threshold;
+    string decision = isMatch ? "same" : similarity < differentThreshold ? "different" : "uncertain";
+    return new ComparisonResult(similarity, threshold, differentThreshold, isMatch, decision);
+}
+
+static PhysicalFileProvider? OpenBrowserAssets(string? directory, string contentRoot)
+{
+    if (string.IsNullOrWhiteSpace(directory))
+        return null;
+    string fullPath = Path.GetFullPath(directory, contentRoot);
+    if (!File.Exists(Path.Combine(fullPath, "index.html")) ||
+        !File.Exists(Path.Combine(fullPath, "_framework", "dotnet.js")))
+        throw new InvalidOperationException($"SimdFace:BrowserAssets must point to the published .NET WASM wwwroot: {fullPath}");
+    return new PhysicalFileProvider(fullPath);
+}
+
+static async Task<ReadOnlyMemory<byte>[]> ReadFiles(HttpRequest request, int count, int fileLimit, CancellationToken cancellation)
 {
     if (!MediaTypeHeaderValue.TryParse(request.ContentType, out var contentType) ||
         !contentType.MediaType.Equals("multipart/form-data", StringComparison.OrdinalIgnoreCase))
-        throw new InvalidDataException("请选择图片文件。");
+        throw new InvalidDataException("请选择要上传的文件。");
     string? boundary = HeaderUtilities.RemoveQuotes(contentType.Boundary).Value;
     if (string.IsNullOrEmpty(boundary) || boundary.Length > 128)
-        throw new InvalidDataException("图片上传格式无效。");
+        throw new InvalidDataException("文件上传格式无效。");
 
-    var reader = new MultipartReader(boundary, request.Body) { BodyLengthLimit = maxFileBytes };
-    var images = new List<RgbImage>(count);
+    var reader = new MultipartReader(boundary, request.Body) { BodyLengthLimit = fileLimit };
+    var files = new ReadOnlyMemory<byte>[count];
+    int index = 0;
     while (await reader.ReadNextSectionAsync(cancellation) is { } section)
     {
-        if (images.Count >= count || section.AsFileSection() is null)
-            throw new InvalidDataException("上传的图片数量不正确。");
+        if (index >= count || section.AsFileSection() is null)
+            throw new InvalidDataException("上传的文件数量不正确。");
         using var buffer = new MemoryStream();
-        await section.Body.CopyToAsync(buffer, cancellation);
-        var label = images.Count == 0 ? "照片 A" : "照片 B";
         try
         {
-            images.Add(ImageDecoder.Decode(buffer.GetBuffer().AsSpan(0, (int)buffer.Length), label,
-                maxPixels: 24_000_000, cancellationToken: cancellation));
+            await section.Body.CopyToAsync(buffer, cancellation);
         }
-        catch (InvalidDataException)
+        catch (InvalidDataException error)
         {
-            throw new InvalidDataException($"无法解码{label}。请选择有效图片，且像素数不超过 2400 万。");
+            string limit = fileLimit >= 1024 * 1024 ? $"{fileLimit / (1024 * 1024)} MiB" : $"{fileLimit / 1024} KiB";
+            throw new InvalidDataException($"无法读取文件 {index + 1}。单个文件上限为 {limit}。", error);
         }
+        files[index++] = buffer.GetBuffer().AsMemory(0, (int)buffer.Length);
     }
-    if (images.Count != count)
-        throw new InvalidDataException($"请选择 {count} 张图片。");
-    return images;
+    if (index != count)
+        throw new InvalidDataException($"请选择 {count} 个文件。");
+    return files;
+}
+
+static ImageUpload InspectImage(ReadOnlyMemory<byte> data, string label)
+{
+    try
+    {
+        var (width, height) = ImageDecoder.GetDimensions(data.Span, label);
+        return new ImageUpload(data, width, height, label);
+    }
+    catch (InvalidDataException error)
+    {
+        throw new InvalidDataException(
+            $"无法读取{label}。请选择有效图片，且像素数不超过 {ImageDecoder.DefaultMaxPixels / 10_000} 万。", error);
+    }
+}
+
+static void Decode(ImageUpload image, Span<byte> rgb, CancellationToken cancellation)
+{
+    try
+    {
+        ImageDecoder.DecodeInto(image.Data.Span, rgb, image.Label, cancellationToken: cancellation);
+    }
+    catch (InvalidDataException error)
+    {
+        throw new InvalidDataException($"无法解码{image.Label}。请选择有效图片。", error);
+    }
 }
 
 static float ReadThreshold(HttpRequest request, string key, float defaultValue, float min)
@@ -168,5 +273,16 @@ static float ReadThreshold(HttpRequest request, string key, float defaultValue, 
     return value;
 }
 
+internal enum PhotoMode { Detect, Compare, Extract }
+
+internal sealed record ImageUpload(ReadOnlyMemory<byte> Data, int Width, int Height, string Label)
+{
+    public int RgbLength => Width * Height * 3;
+}
+
 internal sealed record ImageResult(int Width, int Height, IReadOnlyList<DetectedFace> Faces);
+internal sealed record FeatureVector(string Model, string Pipeline, float[] Values);
+internal sealed record ComparisonResult(float Similarity, float Threshold, float DifferentThreshold, bool IsMatch, string Decision);
+internal sealed record AnalysisResult(ImageResult[] Images, long ElapsedMs, long DecodeMs, string Backend,
+    string? DeviceName, FeatureVector? Feature, ComparisonResult? Comparison, string? Message);
 internal sealed record VulkanModels(VulkanInference Device, FaceDetector Detector, FaceRecognizer Recognizer);

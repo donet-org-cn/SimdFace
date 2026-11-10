@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk.WebAssembly">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SimdFace/SimdFace.csproj" />
+    <ProjectReference Include="../SimdFace.Imaging/SimdFace.Imaging.csproj" />
+    <Content Include="../SimdFace.Web/wwwroot/index.html;../SimdFace.Web/wwwroot/app.js;../SimdFace.Web/wwwroot/app.css;../SimdFace.Web/wwwroot/server-api.js"
+             Link="wwwroot/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../models/face_detection_yunet_2023mar.onnx" Link="wwwroot/models/face_detection_yunet_2023mar.onnx"
+             CopyToOutputDirectory="PreserveNewest" Condition="Exists('../../models/face_detection_yunet_2023mar.onnx')" />
+    <Content Include="../../models/face_recognition_sface_2021dec.onnx" Link="wwwroot/models/face_recognition_sface_2021dec.onnx"
+             CopyToOutputDirectory="PreserveNewest" Condition="Exists('../../models/face_recognition_sface_2021dec.onnx')" />
+  </ItemGroup>
+</Project>

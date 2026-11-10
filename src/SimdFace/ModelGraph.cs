@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
+#if !NETWASM
 using System.Security.Cryptography;
+#endif
 using System.Text;
 
 namespace SimdFace;
@@ -11,22 +13,39 @@ internal sealed partial class ModelGraph
     private readonly Dictionary<string, Weights> weights = new(StringComparer.Ordinal);
     private readonly List<Layer> layers = [];
     private readonly Dictionary<string, int> lastUse = new(StringComparer.Ordinal);
+    private readonly Dictionary<int, ConvActivation?> convActivations = [];
     private readonly string inputName;
     private readonly string[] outputNames;
+
+#if !NETWASM
     private readonly VulkanInference? vulkan;
 
-    public ModelGraph(string path, string sha256, string inputName, VulkanInference? vulkan, params string[] outputNames)
+    private const int MaxModelBytes = 40_000_000;
+
+    internal static byte[] ReadFile(string path)
     {
-        this.inputName = inputName;
-        this.outputNames = outputNames;
-        this.vulkan = vulkan;
         using var file = File.OpenRead(path);
-        if (file.Length > 40_000_000)
+        if (file.Length > MaxModelBytes)
             throw new InvalidDataException($"Unexpected model size: {path}");
         var bytes = new byte[(int)file.Length];
         file.ReadExactly(bytes);
+        return bytes;
+    }
+
+    public ModelGraph(ReadOnlySpan<byte> bytes, string label, string sha256, string inputName,
+        VulkanInference? vulkan, params string[] outputNames)
+    {
+        this.vulkan = vulkan;
+        if (bytes.Length > MaxModelBytes)
+            throw new InvalidDataException($"Unexpected model size: {label}");
         if (!Convert.ToHexString(SHA256.HashData(bytes)).Equals(sha256, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException($"Model SHA-256 mismatch: {path}. Use the version listed in the README.");
+            throw new InvalidDataException($"Model SHA-256 mismatch: {label}. Use the version listed in the README.");
+#else
+    public ModelGraph(ReadOnlySpan<byte> bytes, string inputName, params string[] outputNames)
+    {
+#endif
+        this.inputName = inputName;
+        this.outputNames = outputNames;
 
         var model = new ProtoReader(bytes);
         while (model.Next(out int field, out _, out var value))
@@ -50,12 +69,58 @@ internal sealed partial class ModelGraph
                     lastUse[name] = i;
         foreach (string name in outputNames)
             lastUse[name] = layers.Count;
+
+#if !NETWASM
+        if (vulkan is not null)
+            return;
+#endif
+        PrepareConvActivations();
     }
+
+    private void PrepareConvActivations()
+    {
+        for (int i = 0; i + 1 < layers.Count; i++)
+        {
+            Layer conv = layers[i], norm = layers[i + 1];
+            // Only mutate a fresh convolution output with a single remaining consumer.
+            if (conv.Op != "Conv" || norm.Inputs[0] != conv.Output || lastUse[conv.Output] != i + 1)
+                continue;
+            if (norm.Op == "Relu")
+            {
+                convActivations.Add(i, null);
+                continue;
+            }
+            if (norm.Op != "BatchNormalization" || i + 2 == layers.Count)
+                continue;
+            Layer activation = layers[i + 2];
+            if (activation.Op != "PRelu" || activation.Inputs[0] != norm.Output || lastUse[norm.Output] != i + 2)
+                continue;
+
+            float[] gamma = weights[norm.Inputs[1]].Data, beta = weights[norm.Inputs[2]].Data;
+            float[] mean = weights[norm.Inputs[3]].Data, variance = weights[norm.Inputs[4]].Data;
+            var scale = new float[gamma.Length];
+            var offset = new float[gamma.Length];
+            for (int c = 0; c < scale.Length; c++)
+            {
+                scale[c] = gamma[c] / MathF.Sqrt(variance[c] + norm.Epsilon);
+                offset[c] = beta[c] - mean[c] * scale[c];
+            }
+            convActivations.Add(i, new ConvActivation(scale, offset, weights[activation.Inputs[1]].Data));
+        }
+    }
+
+#if !NETWASM
+    internal bool UsesVulkan => vulkan is not null;
+
+    internal float[][] RunVulkanBatch(Tensor[] inputs) => vulkan!.RunBatch(this, inputs);
+#endif
 
     public float[][] Run(Tensor input)
     {
+#if !NETWASM
         if (vulkan is not null)
             return vulkan.Run(this, input);
+#endif
 
         var values = new Dictionary<string, Tensor>(StringComparer.Ordinal) { [inputName] = input };
         for (int i = 0; i < layers.Count; i++)
@@ -83,10 +148,24 @@ internal sealed partial class ModelGraph
                 "Flatten" or "Reshape" or "Dropout" => x,
                 _ => throw new NotSupportedException($"Unsupported model operator: {layer.Op}")
             };
-            values[layer.Output] = output;
             foreach (string name in args)
                 if (lastUse.TryGetValue(name, out int last) && last == i)
                     values.Remove(name);
+
+            if (convActivations.TryGetValue(i, out var activation))
+            {
+                if (activation is null)
+                {
+                    Kernels.ReluInPlace(output);
+                    i++;
+                }
+                else
+                {
+                    Kernels.NormalizeAndActivate(output, activation.Scale, activation.Offset, activation.Slope);
+                    i += 2;
+                }
+            }
+            values[layers[i].Output] = output;
         }
         return Array.ConvertAll(outputNames, name => values[name].Data);
     }
@@ -175,6 +254,8 @@ internal sealed partial class ModelGraph
                 result.Add((int)reader.ReadVarint());
         }
     }
+
+    private sealed record ConvActivation(float[] Scale, float[] Offset, float[] Slope);
 
     private sealed class Layer
     {

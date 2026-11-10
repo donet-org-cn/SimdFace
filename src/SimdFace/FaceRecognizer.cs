@@ -3,8 +3,11 @@ namespace SimdFace;
 public sealed class FaceRecognizer
 {
     public const string ModelFileName = "face_recognition_sface_2021dec.onnx";
+    internal const string ModelSha256 = "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79";
     public const float ReferenceThreshold = 0.363f;
     public const int EmbeddingSize = 128;
+    public const string ModelId = "sface-2021dec";
+    public const string VerificationPipelineId = "align5-6crop-v1";
     private const int AlignedSize = 112;
     private static readonly double[] VerificationCropScales = [1.0, 0.93, 1.07];
 
@@ -17,10 +20,21 @@ public sealed class FaceRecognizer
 
     private readonly ModelGraph model;
 
+#if !NETWASM
     public FaceRecognizer(string modelPath) : this(modelPath, null) { }
 
-    public FaceRecognizer(string modelPath, VulkanInference? vulkan) => model = new ModelGraph(modelPath,
-        "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79", "data", vulkan, "fc1");
+    public FaceRecognizer(string modelPath, VulkanInference? vulkan)
+        : this(ModelGraph.ReadFile(modelPath), modelPath, vulkan) { }
+
+    /// <summary>Loads the pinned ONNX model from memory for CPU inference.</summary>
+    public FaceRecognizer(ReadOnlySpan<byte> modelBytes) : this(modelBytes, ModelFileName, null) { }
+
+    private FaceRecognizer(ReadOnlySpan<byte> modelBytes, string label, VulkanInference? vulkan) =>
+        model = new ModelGraph(modelBytes, label,
+        ModelSha256, "data", vulkan, "fc1");
+#else
+    internal FaceRecognizer(ReadOnlySpan<byte> modelBytes) => model = new ModelGraph(modelBytes, "data", "fc1");
+#endif
 
     /// <summary>Aligns the face and returns an L2-normalized, 128-dimensional SFace embedding.</summary>
     public float[] Embed(ReadOnlySpan<byte> rgb, int width, int height, FaceLandmarks landmarks) =>
@@ -75,20 +89,45 @@ public sealed class FaceRecognizer
 
         var mirror = crop with { Data = new float[crop.Data.Length] };
         var combined = new float[EmbeddingSize];
+#if !NETWASM
+        Tensor[]? batch = model.UsesVulkan ? new Tensor[VerificationCropScales.Length * 2] : null;
+        int batchIndex = 0;
+#endif
         foreach (double scale in VerificationCropScales)
         {
             cancellationToken.ThrowIfCancellationRequested();
             // Out-of-frame pixels sample as zero, including when a wider crop follows an earlier crop.
             Array.Clear(crop.Data);
             SampleCrop(rgb, scale);
-            AddEmbedding(model.Run(crop)[0]);
+            ProcessCrop(crop);
             cancellationToken.ThrowIfCancellationRequested();
             for (int row = 0; row < 3 * AlignedSize; row++)
                 for (int x = 0; x < AlignedSize; x++)
                     mirror.Data[row * AlignedSize + x] = crop.Data[row * AlignedSize + AlignedSize - 1 - x];
-            AddEmbedding(model.Run(mirror)[0]);
+            ProcessCrop(mirror);
         }
+#if !NETWASM
+        if (batch is not null)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (float[] embedding in model.RunVulkanBatch(batch))
+                AddEmbedding(embedding);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+#endif
         return Normalize(combined);
+
+        void ProcessCrop(Tensor sample)
+        {
+#if !NETWASM
+            if (batch is not null)
+            {
+                batch[batchIndex++] = sample with { Data = (float[])sample.Data.Clone() };
+                return;
+            }
+#endif
+            AddEmbedding(model.Run(sample)[0]);
+        }
 
         void SampleCrop(ReadOnlySpan<byte> pixels, double scale)
         {

@@ -161,11 +161,15 @@ public sealed unsafe class VulkanInference : IDisposable
         }
     }
 
-    internal float[][] Run(ModelGraph graph, Tensor input)
+    internal float[][] Run(ModelGraph graph, Tensor input) => RunBatch(graph, [input]);
+
+    // The batch shares tensor storage while each input and output has a separate staging slice.
+    internal float[][] RunBatch(ModelGraph graph, IReadOnlyList<Tensor> inputs)
     {
         lock (gate)
         {
             ObjectDisposedException.ThrowIf(disposed, this);
+            Tensor input = inputs[0];
             if (!models.TryGetValue(graph, out ModelState? state))
                 models.Add(graph, state = new ModelState());
             GraphPlan? plan = state.Plan;
@@ -173,7 +177,12 @@ public sealed unsafe class VulkanInference : IDisposable
                 plan.Input.Height != input.Height || plan.Input.Width != input.Width)
                 state.Plan = plan = graph.PlanVulkan(input);
 
-            int stagingLength = Math.Max(plan.WeightLength, Math.Max(input.Data.Length, plan.Outputs.Sum(x => x.Length)));
+            int inputLength = input.Data.Length;
+            int outputLength = plan.Outputs.Sum(output => output.Length);
+            int inputTotal = checked(inputLength * inputs.Count);
+            int outputStart = inputs.Count == 1 ? 0 : inputTotal;
+            int stagingLength = Math.Max(plan.WeightLength,
+                Math.Max(inputTotal, checked(outputStart + outputLength * inputs.Count)));
             Arena? arena = state.Arena;
             if (arena is null || arena.Storage.Size < Bytes(plan.Length) || arena.Staging.Size < Bytes(stagingLength))
             {
@@ -182,49 +191,62 @@ public sealed unsafe class VulkanInference : IDisposable
                 state.Arena = arena = CreateArena(plan, stagingLength);
             }
 
-            input.Data.CopyTo(arena.Staging.AsSpan(input.Data.Length));
+            var staging = arena.Staging.AsSpan(stagingLength);
+            for (int i = 0; i < inputs.Count; i++)
+            {
+                Tensor sample = inputs[i];
+                if (sample.Channels != input.Channels || sample.Height != input.Height ||
+                    sample.Width != input.Width || sample.Data.Length != inputLength)
+                    throw new ArgumentException("Vulkan batch inputs must share the same shape.", nameof(inputs));
+                sample.Data.CopyTo(staging.Slice(i * inputLength, inputLength));
+            }
+
             Begin();
-            Copy(arena.Staging, arena.Storage, 0, plan.Input.Offset, input.Data.Length);
-            Barrier(TransferStage, ComputeStage, TransferWrite, ShaderRead | ShaderWrite);
             ulong set = arena.DescriptorSet;
             Vk.vkCmdBindDescriptorSets(command, ComputeBindPoint, pipelineLayout, 0, 1, &set, 0, null);
             ulong boundPipeline = 0;
-            foreach (Dispatch dispatch in plan.Dispatches)
+            int outputOffset = outputStart;
+            for (int i = 0; i < inputs.Count; i++)
             {
-                Dispatch p = dispatch;
-                ulong pipeline = p.Op == 13 ? pointwisePipeline : tensorPipeline;
-                if (pipeline != boundPipeline)
+                Copy(arena.Staging, arena.Storage, i * inputLength, plan.Input.Offset, inputLength);
+                Barrier(TransferStage, ComputeStage, TransferWrite, ShaderRead | ShaderWrite);
+                foreach (Dispatch dispatch in plan.Dispatches)
                 {
-                    Vk.vkCmdBindPipeline(command, ComputeBindPoint, pipeline);
-                    boundPipeline = pipeline;
+                    Dispatch p = dispatch;
+                    ulong pipeline = p.Op == 13 ? pointwisePipeline : tensorPipeline;
+                    if (pipeline != boundPipeline)
+                    {
+                        Vk.vkCmdBindPipeline(command, ComputeBindPoint, pipeline);
+                        boundPipeline = pipeline;
+                    }
+                    Vk.vkCmdPushConstants(command, pipelineLayout, ComputeShader, 0, (uint)sizeof(Dispatch), &p);
+                    uint plane = (uint)(p.OutHeight * p.OutWidth), channels = (uint)p.OutChannels;
+                    if (p.Op == 13)
+                        Vk.vkCmdDispatch(command, (plane + 15) / 16, (channels + 7) / 8, 1);
+                    else
+                        Vk.vkCmdDispatch(command, p.Op == 12 ? channels : (channels * plane + 63) / 64, 1, 1);
+                    Barrier(ComputeStage, ComputeStage, ShaderWrite, ShaderRead | ShaderWrite);
                 }
-                Vk.vkCmdPushConstants(command, pipelineLayout, ComputeShader, 0, (uint)sizeof(Dispatch), &p);
-                uint plane = (uint)(p.OutHeight * p.OutWidth), channels = (uint)p.OutChannels;
-                if (p.Op == 13)
-                    Vk.vkCmdDispatch(command, (plane + 15) / 16, (channels + 7) / 8, 1);
-                else
-                    Vk.vkCmdDispatch(command, p.Op == 12 ? channels : (channels * plane + 63) / 64, 1, 1);
-                Barrier(ComputeStage, ComputeStage, ShaderWrite, ShaderRead | ShaderWrite);
-            }
 
-            Barrier(ComputeStage, TransferStage, ShaderWrite, TransferRead);
-            int offset = 0;
-            foreach (TensorSlot output in plan.Outputs)
-            {
-                Copy(arena.Storage, arena.Staging, output.Offset, offset, output.Length);
-                offset += output.Length;
+                Barrier(ComputeStage, TransferStage, ShaderWrite, TransferRead);
+                foreach (TensorSlot output in plan.Outputs)
+                {
+                    Copy(arena.Storage, arena.Staging, output.Offset, outputOffset, output.Length);
+                    outputOffset += output.Length;
+                }
+                if (i + 1 < inputs.Count)
+                    Barrier(TransferStage, TransferStage, TransferRead, TransferWrite);
             }
             Barrier(TransferStage, HostStage, TransferWrite, HostRead);
             Submit();
 
-            var results = new float[plan.Outputs.Length][];
-            Span<float> staged = arena.Staging.AsSpan(offset);
-            offset = 0;
+            var results = new float[inputs.Count * plan.Outputs.Length][];
+            outputOffset = outputStart;
             for (int i = 0; i < results.Length; i++)
             {
-                int length = plan.Outputs[i].Length;
-                results[i] = staged.Slice(offset, length).ToArray();
-                offset += length;
+                int length = plan.Outputs[i % plan.Outputs.Length].Length;
+                results[i] = staging.Slice(outputOffset, length).ToArray();
+                outputOffset += length;
             }
             return results;
         }
