@@ -11,6 +11,16 @@ SimdFace 是面向 .NET 10 的本地人脸检测与 1:1 比对项目。它用 Yu
 - **多种执行方式**。C# CPU 后端使用 SIMD 和并行卷积，Vulkan 后端把模型算子交给显卡驱动，浏览器可通过官方 .NET WASM AOT 独立运行。
 - **大图处理**。网页支持 JPEG、PNG、WebP，单张最多 64 MiB 和 6400 万像素。托管解码器应用 EXIF 方向，检测坐标映射回校正方向后的原图，SFace 从原图采样。
 
+## NuGet 安装
+
+在 .NET 10 项目中安装推理核心。
+
+```powershell
+dotnet add package SimdFace --version 1.0.0
+```
+
+核心包接收连续的 RGB24 像素。按下文下载模型权重，再用 `FaceDetector` 和 `FaceRecognizer` 加载。图像解码、CLI 和网页测试台可从源码构建。
+
 ## 快速开始
 
 安装 [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) 和 PowerShell 7，在项目根目录下载权重并构建。脚本会校验模型 SHA-256，已有的有效文件会直接复用。

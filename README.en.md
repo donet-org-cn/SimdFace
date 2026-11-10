@@ -11,6 +11,16 @@ SimdFace is a local face detection and 1:1 verification project for .NET 10. It 
 - **Multiple execution paths.** The C# CPU backend uses SIMD and parallel convolution. The Vulkan backend runs model operators on the GPU. The browser can run independently through the official .NET WASM AOT runtime.
 - **Large photos.** The web lab accepts JPEG, PNG, and WebP up to 64 MiB and 64 megapixels per photo. The managed decoder applies EXIF orientation. Detection coordinates are mapped to the oriented image, and SFace samples at full resolution.
 
+## Install from NuGet
+
+Install the inference library in a .NET 10 project.
+
+```sh
+dotnet add package SimdFace --version 1.0.0
+```
+
+The core library takes tightly packed RGB24 pixels. Follow the model download instructions below and load the weights with `FaceDetector` and `FaceRecognizer`. Build the image decoder, CLI, and web lab from source.
+
 ## Quick start
 
 Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) and PowerShell 7. From the repository root, download the pinned model weights and build. The download script verifies SHA-256 and reuses valid files.

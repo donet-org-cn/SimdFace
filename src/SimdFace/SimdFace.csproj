@@ -4,10 +4,21 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>0.1.0</Version>
-    <Description>Managed YuNet face detection and SFace verification for .NET.</Description>
+    <Version>1.0.0</Version>
+    <PackageId>SimdFace</PackageId>
+    <Authors>SimdFace contributors</Authors>
+    <Description>Managed YuNet face detection and SFace face verification for .NET 10, with SIMD CPU inference and optional Vulkan acceleration.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/donet-org-cn/SimdFace</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/donet-org-cn/SimdFace</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>face-detection;face-verification;yunet;sface;onnx;simd;vulkan</PackageTags>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="Vulkan/Shaders/*.spv" />
+    <None Update="README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+    <None Update="Vulkan/SimdSkia.LICENSE.txt" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>
