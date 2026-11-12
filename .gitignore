@@ -4,4 +4,6 @@
 models/*.onnx
 !models/face_detection_yunet_2023mar.onnx
 !models/face_recognition_sface_2021dec.onnx
+!models/minifasnet_v2_simdface.onnx
+!models/face_mesh_468_simdface.onnx
 models/*.partial

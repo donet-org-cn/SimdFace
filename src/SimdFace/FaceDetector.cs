@@ -1,29 +1,53 @@
 namespace SimdFace;
 
+/// <summary>原图中的一个点，以左上角为坐标原点。</summary>
+/// <param name="X">横坐标，单位为像素。</param>
+/// <param name="Y">纵坐标，单位为像素。</param>
 public readonly record struct FacePoint(float X, float Y);
 
-/// <summary>Five landmarks in subject-relative order and original image coordinates.</summary>
+/// <summary>原图中的五个人脸关键点，左右以被测人自身为准。</summary>
+/// <param name="RightEye">被测人的右眼中心。</param>
+/// <param name="LeftEye">被测人的左眼中心。</param>
+/// <param name="Nose">鼻尖。</param>
+/// <param name="RightMouth">被测人的右嘴角。</param>
+/// <param name="LeftMouth">被测人的左嘴角。</param>
 public readonly record struct FaceLandmarks(
     FacePoint RightEye, FacePoint LeftEye, FacePoint Nose, FacePoint RightMouth, FacePoint LeftMouth);
 
+/// <summary>一次人脸检测的结果，包含原图中的人脸框和关键点，以及检测置信度。</summary>
+/// <param name="X">人脸框左边缘的横坐标，单位为像素。</param>
+/// <param name="Y">人脸框上边缘的纵坐标，单位为像素。</param>
+/// <param name="Width">人脸框宽度，单位为像素。</param>
+/// <param name="Height">人脸框高度，单位为像素。</param>
+/// <param name="Score">YuNet 检测置信度。</param>
+/// <param name="Landmarks">用于人脸对齐的五个关键点。</param>
 public readonly record struct DetectedFace(float X, float Y, float Width, float Height, float Score, FaceLandmarks Landmarks);
 
+/// <summary>用 YuNet 检测人脸及五个关键点。</summary>
 public sealed class FaceDetector
 {
+    /// <summary>指定版本的 YuNet ONNX 模型文件名。</summary>
     public const string ModelFileName = "face_detection_yunet_2023mar.onnx";
     internal const string ModelSha256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4";
+    /// <summary>检测置信度的默认下限。</summary>
     public const float DefaultScoreThreshold = 0.8f;
     private static readonly int[] Strides = [8, 16, 32];
 
     private readonly ModelGraph model;
 
 #if !NETWASM
+    /// <summary>加载指定版本的 YuNet 模型，使用 CPU 推理。</summary>
+    /// <param name="modelPath">指定版本的 ONNX 权重文件路径。</param>
     public FaceDetector(string modelPath) : this(modelPath, null) { }
 
+    /// <summary>加载指定版本的 YuNet 模型，使用所选后端推理。</summary>
+    /// <param name="modelPath">指定版本的 ONNX 权重文件路径。</param>
+    /// <param name="vulkan">GPU 推理使用的 Vulkan 设备。传入 <see langword="null"/> 时使用 CPU。</param>
     public FaceDetector(string modelPath, VulkanInference? vulkan)
         : this(ModelGraph.ReadFile(modelPath), modelPath, vulkan) { }
 
-    /// <summary>Loads the pinned ONNX model from memory for CPU inference.</summary>
+    /// <summary>从内存加载指定版本的 ONNX 模型，使用 CPU 推理。</summary>
+    /// <param name="modelBytes">指定版本 ONNX 模型的完整文件内容。</param>
     public FaceDetector(ReadOnlySpan<byte> modelBytes) : this(modelBytes, ModelFileName, null) { }
 
     private FaceDetector(ReadOnlySpan<byte> modelBytes, string label, VulkanInference? vulkan) =>
@@ -37,7 +61,13 @@ public sealed class FaceDetector
         "bbox_8", "bbox_16", "bbox_32", "kps_8", "kps_16", "kps_32");
 #endif
 
-    /// <summary>Detects faces in tightly packed RGB24 data, highest confidence first.</summary>
+    /// <summary>在 RGB24 图像中检测人脸。</summary>
+    /// <param name="rgb">按行连续排列的 RGB24 像素，每个像素三个字节，行尾无填充。</param>
+    /// <param name="width">图像宽度，单位为像素。</param>
+    /// <param name="height">图像高度，单位为像素。</param>
+    /// <param name="scoreThreshold">检测置信度的下限，取值范围为 (0, 1]。</param>
+    /// <returns>按检测置信度从高到低排列的人脸结果。</returns>
+    /// <exception cref="ArgumentOutOfRangeException">置信度阈值超出允许的范围。</exception>
     public IReadOnlyList<DetectedFace> Detect(ReadOnlySpan<byte> rgb, int width, int height,
         float scoreThreshold = DefaultScoreThreshold)
     {

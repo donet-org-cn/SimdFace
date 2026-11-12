@@ -1,17 +1,23 @@
 namespace SimdFace;
 
+/// <summary>对齐检测到的人脸并提取 SFace 身份特征。</summary>
 public sealed class FaceRecognizer
 {
+    /// <summary>指定版本的 SFace ONNX 模型文件名。</summary>
     public const string ModelFileName = "face_recognition_sface_2021dec.onnx";
     internal const string ModelSha256 = "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79";
+    /// <summary>SFace 的余弦相似度参考阈值。</summary>
     public const float ReferenceThreshold = 0.363f;
+    /// <summary>SFace 特征向量的维度。</summary>
     public const int EmbeddingSize = 128;
+    /// <summary>指定版本的 SFace 模型标识。</summary>
     public const string ModelId = "sface-2021dec";
+    /// <summary>六次裁剪比对流程的标识。</summary>
     public const string VerificationPipelineId = "align5-6crop-v1";
     private const int AlignedSize = 112;
     private static readonly double[] VerificationCropScales = [1.0, 0.93, 1.07];
 
-    // SFace's five-point reference geometry, in the same order as YuNet.
+    // SFace 对齐模板的五个关键点，顺序与 YuNet 输出一致。
     private static readonly FacePoint[] Template =
     [
         new(38.2946f, 51.6963f), new(73.5318f, 51.5014f), new(56.0252f, 71.7366f),
@@ -21,12 +27,18 @@ public sealed class FaceRecognizer
     private readonly ModelGraph model;
 
 #if !NETWASM
+    /// <summary>加载指定版本的 SFace 模型，使用 CPU 推理。</summary>
+    /// <param name="modelPath">指定版本的 ONNX 权重文件路径。</param>
     public FaceRecognizer(string modelPath) : this(modelPath, null) { }
 
+    /// <summary>加载指定版本的 SFace 模型，使用所选后端推理。</summary>
+    /// <param name="modelPath">指定版本的 ONNX 权重文件路径。</param>
+    /// <param name="vulkan">GPU 推理使用的 Vulkan 设备。传入 <see langword="null"/> 时使用 CPU。</param>
     public FaceRecognizer(string modelPath, VulkanInference? vulkan)
         : this(ModelGraph.ReadFile(modelPath), modelPath, vulkan) { }
 
-    /// <summary>Loads the pinned ONNX model from memory for CPU inference.</summary>
+    /// <summary>从内存加载指定版本的 ONNX 模型，使用 CPU 推理。</summary>
+    /// <param name="modelBytes">指定版本 ONNX 模型的完整文件内容。</param>
     public FaceRecognizer(ReadOnlySpan<byte> modelBytes) : this(modelBytes, ModelFileName, null) { }
 
     private FaceRecognizer(ReadOnlySpan<byte> modelBytes, string label, VulkanInference? vulkan) =>
@@ -36,11 +48,22 @@ public sealed class FaceRecognizer
     internal FaceRecognizer(ReadOnlySpan<byte> modelBytes) => model = new ModelGraph(modelBytes, "data", "fc1");
 #endif
 
-    /// <summary>Aligns the face and returns an L2-normalized, 128-dimensional SFace embedding.</summary>
+    /// <summary>对齐人脸并提取经 L2 归一化的 128 维 SFace 特征。</summary>
+    /// <param name="rgb">按行连续排列的 RGB24 像素，每个像素三个字节，行尾无填充。</param>
+    /// <param name="width">图像宽度，单位为像素。</param>
+    /// <param name="height">图像高度，单位为像素。</param>
+    /// <param name="landmarks">检测到的五个人脸关键点，用于对齐。</param>
+    /// <returns>从一次对齐裁剪中提取的归一化特征向量。</returns>
     public float[] Embed(ReadOnlySpan<byte> rgb, int width, int height, FaceLandmarks landmarks) =>
         EmbedCore(rgb, width, height, landmarks, enhanced: false, CancellationToken.None);
 
-    /// <summary>Combines three aligned crops and their mirrors into one normalized SFace embedding.</summary>
+    /// <summary>融合三张对齐裁剪图及其镜像的特征。</summary>
+    /// <param name="rgb">按行连续排列的 RGB24 像素，每个像素三个字节，行尾无填充。</param>
+    /// <param name="width">图像宽度，单位为像素。</param>
+    /// <param name="height">图像高度，单位为像素。</param>
+    /// <param name="landmarks">检测到的五个人脸关键点，用于对齐。</param>
+    /// <param name="cancellationToken">在多次特征推理之间检查的取消令牌。</param>
+    /// <returns>六次推理融合后的归一化特征向量。</returns>
     public float[] EmbedForVerification(ReadOnlySpan<byte> rgb, int width, int height, FaceLandmarks landmarks,
         CancellationToken cancellationToken = default) =>
         EmbedCore(rgb, width, height, landmarks, enhanced: true, cancellationToken);
@@ -65,7 +88,7 @@ public sealed class FaceRecognizer
         tx /= points.Length;
         ty /= points.Length;
 
-        // Fit a rotation, uniform scale and translation from source to template.
+        // 拟合从原图关键点到模板关键点的旋转、等比缩放和平移。
         double dot = 0, cross = 0, norm = 0;
         for (int i = 0; i < points.Length; i++)
         {
@@ -96,7 +119,7 @@ public sealed class FaceRecognizer
         foreach (double scale in VerificationCropScales)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            // Out-of-frame pixels sample as zero, including when a wider crop follows an earlier crop.
+            // 超出原图的采样位置填零，复用缓冲区时也要清除前一次裁剪残留的像素。
             Array.Clear(crop.Data);
             SampleCrop(rgb, scale);
             ProcessCrop(crop);
@@ -160,6 +183,11 @@ public sealed class FaceRecognizer
         return embedding;
     }
 
+    /// <summary>计算两个 SFace 特征向量的余弦相似度。</summary>
+    /// <param name="first">第一个特征向量。</param>
+    /// <param name="second">第二个特征向量。</param>
+    /// <returns>余弦相似度，取值范围为 [-1, 1]。</returns>
+    /// <exception cref="ArgumentException">特征维度错误，或向量范数为零或非有限值。</exception>
     public static float CosineSimilarity(ReadOnlySpan<float> first, ReadOnlySpan<float> second)
     {
         if (first.Length != EmbeddingSize || second.Length != EmbeddingSize)

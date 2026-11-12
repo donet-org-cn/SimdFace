@@ -8,18 +8,19 @@ SimdFace 是面向 .NET 10 的本地人脸检测与 1:1 比对项目。它用 Yu
 
 - **人脸检测**。输出置信度、边界框和五个关键点。网页支持拖拽、预览和叠加标注。
 - **照片比对与特征导出**。比对两张单人照片，或者导出特征 JSON，稍后在同一模型和提取流程下直接比较向量。
+- **摄像头活体核验**。通过随机转头、闭眼睁眼或张嘴合嘴指令，结合防翻拍评分，分别给出活体和参考照匹配结论。
 - **多种执行方式**。C# CPU 后端使用 SIMD 和并行卷积，Vulkan 后端把模型算子交给显卡驱动，浏览器可通过官方 .NET WASM AOT 独立运行。
 - **大图处理**。网页支持 JPEG、PNG、WebP，单张最多 64 MiB 和 6400 万像素。托管解码器应用 EXIF 方向，检测坐标映射回校正方向后的原图，SFace 从原图采样。
 
 ## NuGet 安装
 
-在 .NET 10 项目中安装推理核心。
+在 .NET 10 项目中安装推理核心。[NuGet.org](https://www.nuget.org/packages/SimdFace/1.1.0) · [1.1.0 发布说明](docs/releases/v1.1.0.md)
 
 ```powershell
-dotnet add package SimdFace --version 1.0.0
+dotnet add package SimdFace --version 1.1.0
 ```
 
-核心包接收连续的 RGB24 像素。用 `FaceDetector` 和 `FaceRecognizer` 加载仓库 `models/` 下的权重。图像解码、CLI 和网页测试台可从源码构建。
+核心包接收连续的 RGB24 像素，包含人脸检测、特征提取和活体核验 API，以及中文 IntelliSense 文档。模型权重及各自的许可证见仓库 [models/](models/)。图像解码、CLI 和网页测试台可从源码构建。[C# 调用示例](src/SimdFace/README.md)
 
 ## 快速开始
 
@@ -33,13 +34,13 @@ dotnet build SimdFace.slnx -c Release --no-restore
 
 ### 网页测试台
 
-启动 ASP.NET Core 服务，然后打开 [http://127.0.0.1:5088/](http://127.0.0.1:5088/)。
+启动 ASP.NET Core 服务。默认监听所有网卡的 5088 端口，本机可打开 [http://127.0.0.1:5088/](http://127.0.0.1:5088/)，局域网设备可访问 `http://<服务主机的局域网 IP>:5088/`。
 
 ```powershell
 dotnet run -c Release --no-build --project src/SimdFace.Web
 ```
 
-在「推理设备」中选择后端 CPU 或后端 GPU（Vulkan）。GPU 路径使用项目内嵌的 SPIR-V，需要兼容的 Vulkan loader 和显卡驱动。解码、图像对齐和输出后处理仍在 CPU 执行。Vulkan 后端面向 64 位 Windows 和 Linux，本文的性能数据来自 Windows 实测。
+网页的照片检测、比对和特征提取默认使用后端 GPU（Vulkan），也可在「推理设备」中切换到后端 CPU。GPU 路径使用项目内嵌的 SPIR-V，需要兼容的 Vulkan loader 和显卡驱动。解码、图像对齐和输出后处理仍在 CPU 执行。Vulkan 后端面向 64 位 Windows 和 Linux，本文的性能数据来自 Windows 实测。
 
 ### 在同一个页面启用浏览器 WASM
 
@@ -49,12 +50,68 @@ dotnet run -c Release --no-build --project src/SimdFace.Web
 dotnet workload install wasm-tools
 dotnet publish src/SimdFace.Browser -c Release -p:RunAOTCompilation=true
 $simdFaceWasm = Join-Path $PWD 'src/SimdFace.Browser/bin/Release/net10.0/publish/wwwroot'
-dotnet run --project src/SimdFace.Web -c Release -- --urls http://127.0.0.1:5089 --SimdFace:BrowserAssets "$simdFaceWasm"
+dotnet run --project src/SimdFace.Web -c Release -- --urls 'http://*:5089' --SimdFace:BrowserAssets "$simdFaceWasm"
 ```
 
 打开 [统一测试台](http://127.0.0.1:5089/)。浏览器 WASM 在页面打开时初始化，约 37 MiB 的权重在第一次处理照片时加载。浏览器模式在 Web Worker 中处理照片和向量。选择后端时，页面把文件发给本机服务，在结果中分开显示解码、推理和请求耗时。向量比对可在浏览器或后端 CPU 上执行。
 
 纯静态部署可以发布整个 `wwwroot`，包括 `_framework` 和 `models`。本机可用 Python 运行 `python scripts/serve-wasm.py`，用 HTTP 服务该目录。
+
+### 摄像头核验
+
+打开测试台顶部的「摄像头核验」，选择一张单人正面照，允许摄像头访问，按提示转一次头，再完成随机出现的闭眼睁眼或张嘴合嘴动作。页面分别显示 SFace 照片匹配和活体结果。核验会检查转头前后的人脸一致性，再融合两次正脸的 SFace 特征，与参考照片比对。融合分数达到 0.61 且两次单独比对各达到 0.54 时，照片比对通过。MiniFASNetV2 在合适的帧上做防翻拍评分，MediaPipe Face Mesh 在正脸采样时估计 468 个三维点。这里的 Z 坐标是从 RGB 估计的相对深度。浏览器只采集帧，模型推理在 .NET 后端执行。照片比对和检测可用 Vulkan，防翻拍和网格用 CPU。
+
+其他 .NET 应用可以直接使用核心库的 [`FaceVerificationSession`](src/SimdFace/FaceVerificationSession.cs)。加载 YuNet、SFace、MiniFASNetV2 和 Face Mesh，用参考照片生成 `EmbedForVerification` 特征，为每次核验创建一个会话，再按采集顺序调用 `ProcessFrame(rgb, width, height)`。帧使用紧密排列的 RGB24 像素。返回值包含当前动作、照片相似度和独立的活体结论，应用负责采集、显示提示和控制会话时限。
+
+#### C# 活体检测示例
+
+把仓库 `models/` 中的四份 ONNX 文件放到程序工作目录的 `models/` 下。将参考照解码为 RGB24，通过 `frames` 按采集顺序和实际帧间隔传入摄像头画面。示例使用 .NET 10 控制台项目的默认隐式 using。
+
+```csharp
+using SimdFace;
+
+var detector = new FaceDetector(Path.Combine("models", FaceDetector.ModelFileName));
+var recognizer = new FaceRecognizer(Path.Combine("models", FaceRecognizer.ModelFileName));
+var antiSpoof = new FaceAntiSpoof(Path.Combine("models", FaceAntiSpoof.ModelFileName));
+var mesh = new FaceMesh(Path.Combine("models", FaceMesh.ModelFileName));
+
+async Task<bool> VerifyAsync(RgbFrame photo, IAsyncEnumerable<RgbFrame> frames,
+    Action<FaceVerificationResult> showPrompt, CancellationToken cancellationToken = default)
+{
+    var faces = detector.Detect(photo.Pixels, photo.Width, photo.Height);
+    if (faces.Count != 1)
+        throw new ArgumentException("参考照片应恰好包含一张脸。", nameof(photo));
+
+    var reference = recognizer.EmbedForVerification(
+        photo.Pixels, photo.Width, photo.Height, faces[0].Landmarks, cancellationToken);
+    var session = new FaceVerificationSession(detector, recognizer, antiSpoof, mesh, reference);
+
+    await foreach (var frame in frames.WithCancellation(cancellationToken))
+    {
+        var result = session.ProcessFrame(frame.Pixels, frame.Width, frame.Height, cancellationToken);
+        showPrompt(result);
+        if (result.IsFinished)
+            return result.Liveness == FaceLivenessDecision.Passed &&
+                   result.Identity == FaceIdentityDecision.Match;
+    }
+
+    return false;
+}
+
+public sealed record RgbFrame(byte[] Pixels, int Width, int Height);
+```
+
+`showPrompt` 可读取 `Stage`、`TurnDirection`、`ExpressionPrompt` 和 `Hint`，显示转头、闭眼、睁眼、张嘴或合嘴提示。调用方可用取消令牌限制核验时长。`VerifyAsync` 只有在活体通过且人脸匹配时才返回 `true`。
+
+本机可打开 [摄像头核验](http://localhost:5088/verify.html)。手机与电脑连接同一局域网时，可用 Windows 上的 PowerShell 7.4+ 启动 HTTPS。将参数换成电脑在该网段的 IP。
+
+```powershell
+pwsh -File ./scripts/Start-CameraLab.ps1 -LanAddress 192.168.1.3
+```
+
+脚本打印 HTTPS 地址和本地 CA 公钥证书下载地址。首次测试时在手机上安装并信任该证书，再打开 HTTPS 页面。iPhone 还需要在「设置 → 通用 → 关于本机 → 证书信任设置」启用完全信任。[Apple 证书信任说明](https://support.apple.com/zh-cn/102390)
+
+仓库包含两份摄像头模型及其上游许可证。MiniFASNetV2 的全连接节点经过等价转换，Face Mesh 的常量节点在离线阶段折叠。准备脚本会校验源文件并对照转换前后输出。[MiniFASNetV2](https://github.com/yakhyo/face-anti-spoofing/releases/tag/weights) · [Face Mesh](https://github.com/yakhyo/mediapipe-face-mesh-onnx/releases/tag/weights) · [模型转换脚本](scripts/prepare-camera-models.py)
 
 ### 命令行
 

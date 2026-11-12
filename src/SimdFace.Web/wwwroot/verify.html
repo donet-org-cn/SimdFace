@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SimdFace · 摄像头核验</title>
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="verify.css?v=2">
+  <script type="module" src="verify.js?v=4"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a href="/" class="brand"><span class="brand-icon" aria-hidden="true">⌖</span>SimdFace</a>
+      <a href="/">返回照片测试台</a>
+    </div>
+  </header>
+  <main class="shell camera-shell">
+    <h1>摄像头核验</h1>
+    <p>选择一张清晰的正面照片，打开摄像头后按提示转头并做眼睛或嘴部动作。页面会分别显示照片匹配和活体结果。</p>
+    <section class="workbench camera-grid" aria-label="核验测试">
+      <div class="camera-view" id="camera-view" data-state="idle">
+        <video id="camera" autoplay playsinline muted></video>
+        <canvas id="face-box" aria-hidden="true"></canvas>
+        <div id="camera-placeholder">摄像头未打开</div>
+        <div class="camera-prompt">
+          <div role="status" aria-atomic="true">
+            <h2 id="camera-status">等待开始</h2>
+            <p id="camera-instruction">请先选择参考照片。</p>
+          </div>
+          <progress id="camera-progress" max="4" value="0" aria-label="核验进度" hidden></progress>
+        </div>
+      </div>
+      <div class="camera-controls">
+        <form id="camera-form">
+          <label for="reference">参考照片</label>
+          <input id="reference" type="file" accept="image/jpeg,image/png,image/webp" required>
+          <label for="camera-backend">推理设备</label>
+          <select id="camera-backend">
+            <option value="vulkan">后端 GPU（Vulkan）</option>
+            <option value="cpu">后端 CPU</option>
+          </select>
+          <div class="camera-actions">
+            <button id="camera-start" class="primary" type="submit">打开摄像头并开始</button>
+            <button id="camera-stop" type="button" disabled>停止</button>
+          </div>
+        </form>
+        <section id="camera-result" class="camera-result" data-state="idle" aria-label="核验结果">
+          <dl>
+            <div><dt>照片比对</dt><dd id="identity-result">待核验</dd></div>
+            <div><dt>活体检测</dt><dd id="liveness-result">待核验</dd></div>
+            <div><dt>本次推理</dt><dd id="device-result">—</dd></div>
+          </dl>
+          <p id="timing" class="camera-timing"></p>
+        </section>
+      </div>
+    </section>
+    <details class="workbench camera-mesh" id="mesh-panel" hidden>
+      <summary>查看 468 点 3D 人脸</summary>
+      <div class="mesh-view">
+        <canvas id="mesh" width="384" height="290" aria-label="估计的三维人脸关键点"></canvas>
+        <div>
+          <label for="mesh-angle">旋转视角</label>
+          <input id="mesh-angle" type="range" min="-75" max="75" value="0">
+          <p>基于彩色视频估计，相对深度。</p>
+        </div>
+      </div>
+    </details>
+    <footer><span>参考照片和核验帧仅在当前服务中处理，图像不写入磁盘。</span></footer>
+  </main>
+</body>
+</html>

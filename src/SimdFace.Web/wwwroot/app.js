@@ -10,8 +10,10 @@ const modes = [...document.querySelectorAll('[data-mode]')];
 const maxFileSize = 64 * 1024 * 1024;
 const maxPixels = 64_000_000;
 let mode = 'detect';
+let restorePhotoGpu = false;
 let activeRequest = null;
 let runtimeState = local ? 'loading' : 'ready';
+let browserEngine = 'WASM AOT';
 const featureA = byId('feature-a');
 const featureB = byId('feature-b');
 const featureJson = byId('feature-json');
@@ -20,17 +22,17 @@ const wasmOption = backend.querySelector('[value="wasm"]');
 const gpuOption = backend.querySelector('[value="vulkan"]');
 wasmOption.hidden = wasmOption.disabled = !local;
 byId('backend-control').hidden = !server;
-backend.value = local ? 'wasm' : 'cpu';
+byId('camera-link').hidden = !server;
+backend.value = server ? 'vulkan' : 'wasm';
 document.querySelectorAll('[data-local-only]').forEach(element => element.hidden = false);
 setMode('detect');
 
 if (local) {
-  byId('engine-label').textContent = 'WASM AOT';
   const status = byId('wasm-status');
   status.hidden = false;
   status.textContent = '正在初始化 WASM…';
   ready.then(engine => {
-    byId('engine-label').textContent = engine;
+    browserEngine = engine;
     runtimeState = 'ready';
     status.textContent = 'WASM 已就绪';
     refreshRun();
@@ -120,7 +122,13 @@ function setMode(next) {
   const compare = mode === 'compare';
   const vectors = mode === 'vectors';
   gpuOption.disabled = vectors;
-  if (vectors && backend.value === 'vulkan') backend.value = 'cpu';
+  if (vectors && backend.value === 'vulkan') {
+    restorePhotoGpu = true;
+    backend.value = 'cpu';
+  } else if (!vectors && restorePhotoGpu) {
+    restorePhotoGpu = false;
+    backend.value = 'vulkan';
+  }
   modes.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.mode === mode)));
   uploads.classList.toggle('compare', compare);
   uploads.hidden = vectors;
@@ -160,6 +168,8 @@ function refreshRun() {
   const inputsReady = mode === 'vectors' ? featureA.files.length && featureB.files.length
     : cards[0].file && (mode !== 'compare' || cards[1].file);
   const inBrowser = backend.value === 'wasm';
+  byId('engine-label').textContent = inBrowser ? browserEngine
+    : backend.value === 'vulkan' ? 'Vulkan GPU' : 'CPU SIMD';
   byId('processing-note').textContent = inBrowser
     ? '照片与特征仅在浏览器中处理'
     : '照片与特征发送到所选后端处理';
@@ -200,7 +210,11 @@ modes.forEach(button => button.addEventListener('click', () => {
   if (mode !== button.dataset.mode) setMode(button.dataset.mode);
 }));
 [score, threshold].forEach(input => input.addEventListener('input', resetResults));
-[backend, featureA, featureB].forEach(input => input.addEventListener('change', resetResults));
+backend.addEventListener('change', () => {
+  restorePhotoGpu = false;
+  resetResults();
+});
+[featureA, featureB].forEach(input => input.addEventListener('change', resetResults));
 byId('download-feature').addEventListener('click', () => {
   const url = URL.createObjectURL(new Blob([featureJson.value], { type: 'application/json' }));
   const link = document.createElement('a');

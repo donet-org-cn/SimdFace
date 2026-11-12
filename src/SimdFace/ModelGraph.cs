@@ -7,7 +7,7 @@ using System.Text;
 
 namespace SimdFace;
 
-// Reads only the ONNX fields and operators used by the two pinned models.
+// Reads only the ONNX fields and operators used by the pinned models.
 internal sealed partial class ModelGraph
 {
     private readonly Dictionary<string, Weights> weights = new(StringComparer.Ordinal);
@@ -19,6 +19,7 @@ internal sealed partial class ModelGraph
 
 #if !NETWASM
     private readonly VulkanInference? vulkan;
+    private readonly Dictionary<string, int[]> integerWeights = new(StringComparer.Ordinal);
 
     private const int MaxModelBytes = 40_000_000;
 
@@ -136,6 +137,9 @@ internal sealed partial class ModelGraph
                     weights[args[3]].Data, weights[args[4]].Data, layer.Epsilon),
                 "PRelu" => Kernels.PRelu(x, weights[args[1]].Data),
                 "Relu" => Kernels.PRelu(x, null),
+#if !NETWASM
+                "Pad" => Kernels.ZeroPad(x, integerWeights[args[1]]),
+#endif
                 "MaxPool" => Kernels.Pool2(x),
                 "Resize" => Kernels.Upsample2(x),
                 "Transpose" => Kernels.ToInterleaved(x),
@@ -196,6 +200,15 @@ internal sealed partial class ModelGraph
             weights.Add(name, new Weights(shape.ToArray(), raw.IsEmpty
                 ? scalarValues.ToArray()
                 : MemoryMarshal.Cast<byte, float>(raw).ToArray()));
+#if !NETWASM
+        else if (type == 7 && raw.Length == 8 * sizeof(long))
+        {
+            var integers = new int[raw.Length / sizeof(long)];
+            for (int i = 0; i < integers.Length; i++)
+                integers[i] = (int)BinaryPrimitives.ReadInt64LittleEndian(raw[(i * sizeof(long))..]);
+            integerWeights.Add(name, integers);
+        }
+#endif
     }
 
     private static Layer ReadLayer(ReadOnlySpan<byte> data)

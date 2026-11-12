@@ -207,6 +207,21 @@ internal static class Kernels
         return x with { Data = result };
     }
 
+#if !NETWASM
+    public static Tensor ZeroPad(Tensor x, int[] pads)
+    {
+        int channels = x.Channels + pads[1] + pads[5];
+        int height = x.Height + pads[2] + pads[6];
+        int width = x.Width + pads[3] + pads[7];
+        var output = new Tensor(channels, height, width, new float[channels * height * width]);
+        for (int c = 0; c < x.Channels; c++)
+        for (int row = 0; row < x.Height; row++)
+            x.Data.AsSpan(c * x.Plane + row * x.Width, x.Width).CopyTo(
+                output.Data.AsSpan((c + pads[1]) * output.Plane + (row + pads[2]) * width + pads[3], x.Width));
+        return output;
+    }
+#endif
+
     public static Tensor Pool2(Tensor x)
     {
         var output = new Tensor(x.Channels, x.Height / 2, x.Width / 2, new float[x.Channels * (x.Height / 2) * (x.Width / 2)]);

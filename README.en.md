@@ -8,18 +8,19 @@ SimdFace is a local face detection and 1:1 verification project for .NET 10. It 
 
 - **Face detection.** Get bounding boxes, confidence scores, and five landmarks. The web lab supports drag and drop, previews, and overlays.
 - **Photo verification and embedding export.** Compare two photos with one face each, or export embeddings as JSON and compare them later using the same model and extraction pipeline.
+- **Camera liveness verification.** Combines randomized head turns, eye closure or mouth movement with anti-spoof scoring. Reports liveness and reference photo matching separately.
 - **Multiple execution paths.** The C# CPU backend uses SIMD and parallel convolution. The Vulkan backend runs model operators on the GPU. The browser can run independently through the official .NET WASM AOT runtime.
 - **Large photos.** The web lab accepts JPEG, PNG, and WebP up to 64 MiB and 64 megapixels per photo. The managed decoder applies EXIF orientation. Detection coordinates are mapped to the oriented image, and SFace samples at full resolution.
 
 ## Install from NuGet
 
-Install the inference library in a .NET 10 project.
+Install the inference library in a .NET 10 project. [NuGet.org](https://www.nuget.org/packages/SimdFace/1.1.0) · [1.1.0 release notes](docs/releases/v1.1.0.md)
 
 ```sh
-dotnet add package SimdFace --version 1.0.0
+dotnet add package SimdFace --version 1.1.0
 ```
 
-The core library takes tightly packed RGB24 pixels. Use `FaceDetector` and `FaceRecognizer` to load the weights from the repository’s `models/` directory. Build the image decoder, CLI, and web lab from source.
+The package accepts tightly packed RGB24 pixels and includes face detection, embeddings, liveness verification, and Chinese IntelliSense documentation. Model weights and their licenses are available in [models/](models/). Build the image decoder, CLI, and web lab from source. [C# integration example](src/SimdFace/README.md)
 
 ## Quick start
 
@@ -33,7 +34,7 @@ dotnet build SimdFace.slnx -c Release --no-restore
 
 ### Web lab
 
-Start the ASP.NET Core host and open [http://127.0.0.1:5088/](http://127.0.0.1:5088/). The interface uses Simplified Chinese. Choose the server CPU or Vulkan GPU from the inference device selector.
+Start the ASP.NET Core host. It listens on port 5088 on all network interfaces. Open [http://127.0.0.1:5088/](http://127.0.0.1:5088/) locally or use the host’s LAN IP from another device. The Simplified Chinese interface defaults to the server Vulkan GPU for photo operations. The device selector also offers server CPU.
 
 ```powershell
 dotnet run -c Release --no-build --project src/SimdFace.Web
@@ -49,12 +50,68 @@ Install the `wasm-tools` workload and publish the AOT assets. The ASP.NET Core h
 dotnet workload install wasm-tools
 dotnet publish src/SimdFace.Browser -c Release -p:RunAOTCompilation=true
 $simdFaceWasm = Join-Path $PWD 'src/SimdFace.Browser/bin/Release/net10.0/publish/wwwroot'
-dotnet run --project src/SimdFace.Web -c Release -- --urls http://127.0.0.1:5089 --SimdFace:BrowserAssets "$simdFaceWasm"
+dotnet run --project src/SimdFace.Web -c Release -- --urls 'http://*:5089' --SimdFace:BrowserAssets "$simdFaceWasm"
 ```
 
 Open the [unified web lab](http://127.0.0.1:5089/). Browser WASM initializes when the page opens and loads about 37 MiB of model weights on the first photo operation. Browser mode processes photos and embeddings in a Web Worker. Selecting a server backend sends files to the local service and displays separate decoding, inference, and request times. Embedding comparison runs in the browser or on the server CPU.
 
 For static deployment, publish the entire `wwwroot` directory, including `_framework` and `models`. Run `python scripts/serve-wasm.py` to serve it over HTTP locally.
+
+### Camera verification
+
+Choose **摄像头核验** in the web lab, select a reference photo with one face, allow camera access, then follow a head-turn prompt and a randomly selected eye or mouth action. The page shows separate SFace matching and liveness decisions. It checks that the face stays consistent during the challenge and compares the reference with the combined embeddings of the two frontal frames. The photo match requires a pooled score of 0.61 and a score of at least 0.54 on each frame. MiniFASNetV2 scores suitable frames for presentation attacks, and MediaPipe Face Mesh estimates 468 landmarks on frontal samples. The Z coordinate is relative depth estimated from RGB. The browser captures frames and .NET runs the models. Vulkan can run detection and matching, while the attack detector and mesh run on the CPU.
+
+Other .NET applications can use [`FaceVerificationSession`](src/SimdFace/FaceVerificationSession.cs) directly from the core library. Load YuNet, SFace, MiniFASNetV2, and Face Mesh, use `EmbedForVerification` to extract the reference embedding, and create a session per attempt. Call `ProcessFrame(rgb, width, height)` in capture order with tightly packed RGB24 frames. The result contains the current prompt, reference similarity, and a separate liveness decision. The application owns capture, prompts, and session expiry.
+
+#### C# liveness example
+
+Place the four ONNX files from the repository’s `models/` directory under `models/` in your working directory. Decode the reference photo to RGB24 and supply frames in capture order at the camera cadence. This example uses the default implicit usings in a .NET 10 console project.
+
+```csharp
+using SimdFace;
+
+var detector = new FaceDetector(Path.Combine("models", FaceDetector.ModelFileName));
+var recognizer = new FaceRecognizer(Path.Combine("models", FaceRecognizer.ModelFileName));
+var antiSpoof = new FaceAntiSpoof(Path.Combine("models", FaceAntiSpoof.ModelFileName));
+var mesh = new FaceMesh(Path.Combine("models", FaceMesh.ModelFileName));
+
+async Task<bool> VerifyAsync(RgbFrame photo, IAsyncEnumerable<RgbFrame> frames,
+    Action<FaceVerificationResult> showPrompt, CancellationToken cancellationToken = default)
+{
+    var faces = detector.Detect(photo.Pixels, photo.Width, photo.Height);
+    if (faces.Count != 1)
+        throw new ArgumentException("The reference photo must contain exactly one face.", nameof(photo));
+
+    var reference = recognizer.EmbedForVerification(
+        photo.Pixels, photo.Width, photo.Height, faces[0].Landmarks, cancellationToken);
+    var session = new FaceVerificationSession(detector, recognizer, antiSpoof, mesh, reference);
+
+    await foreach (var frame in frames.WithCancellation(cancellationToken))
+    {
+        var result = session.ProcessFrame(frame.Pixels, frame.Width, frame.Height, cancellationToken);
+        showPrompt(result);
+        if (result.IsFinished)
+            return result.Liveness == FaceLivenessDecision.Passed &&
+                   result.Identity == FaceIdentityDecision.Match;
+    }
+
+    return false;
+}
+
+public sealed record RgbFrame(byte[] Pixels, int Width, int Height);
+```
+
+Use `Stage`, `TurnDirection`, `ExpressionPrompt`, and `Hint` in `showPrompt` to guide each action. Set a time limit with the cancellation token. `VerifyAsync` returns `true` only when liveness passes and the face matches.
+
+Open the [camera lab](http://localhost:5088/verify.html) on the host. For a phone on the same network, start the HTTPS lab from PowerShell 7.4+ on Windows. Replace the address with the host’s LAN IP.
+
+```powershell
+pwsh -File ./scripts/Start-CameraLab.ps1 -LanAddress 192.168.1.3
+```
+
+The script prints the HTTPS URL and a download link for the local CA’s public certificate. Install and trust the certificate on the phone before opening the HTTPS page. On iPhone, enable full trust in Settings → General → About → Certificate Trust Settings. [Apple certificate trust instructions](https://support.apple.com/en-us/102390)
+
+The repository includes the camera weights and their upstream licenses. The offline preparation script converts the MiniFASNetV2 dense layers to equivalent ONNX nodes, folds constants in Face Mesh, and compares the original and converted model outputs. [MiniFASNetV2](https://github.com/yakhyo/face-anti-spoofing/releases/tag/weights) · [Face Mesh](https://github.com/yakhyo/mediapipe-face-mesh-onnx/releases/tag/weights) · [Model preparation script](scripts/prepare-camera-models.py)
 
 ### Command line
 

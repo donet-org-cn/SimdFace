@@ -1,0 +1,134 @@
+name: NuGet release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nuget-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Validate package version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(dotnet msbuild src/SimdFace -getProperty:PackageVersion)
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          if [ "$GITHUB_REF_TYPE" = tag ]; then test "$GITHUB_REF_NAME" = "v$version"; fi
+          test -s "docs/releases/v$version.md"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Restore and build
+        run: |
+          dotnet restore SimdFace.slnx --locked-mode
+          dotnet build SimdFace.slnx -c Release --no-restore -p:ContinuousIntegrationBuild=true
+      - name: Pack and consume the release package
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          dotnet pack src/SimdFace -c Release --no-build -o release
+          consumer=tools/NuGetPackageConsumer
+          dotnet restore "$consumer" --source "$PWD/release" --packages "$RUNNER_TEMP/simdface-packages" \
+            -p:PackageVersionUnderTest="$RELEASE_VERSION"
+          dotnet build "$consumer" -c Release --no-restore -p:PackageVersionUnderTest="$RELEASE_VERSION"
+          dotnet "$consumer/bin/Release/net10.0/NuGetPackageConsumer.dll" models
+          test -s "$RUNNER_TEMP/simdface-packages/simdface/$RELEASE_VERSION/lib/net10.0/SimdFace.xml"
+          (cd release && sha256sum "SimdFace.$RELEASE_VERSION.nupkg" > SHA256SUMS.txt)
+      - name: Test the packaged Vulkan backend with Mesa's software device
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+          export VK_DRIVER_FILES=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
+          test -n "$VK_DRIVER_FILES"
+          dotnet tools/NuGetPackageConsumer/bin/Release/net10.0/NuGetPackageConsumer.dll models --vulkan
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget-${{ steps.version.outputs.version }}
+          path: release/
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: nuget-release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          name: nuget-${{ needs.build.outputs.version }}
+          path: release
+      - run: cd release && sha256sum -c SHA256SUMS.txt
+      - uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ vars.NUGET_USER }}
+      - name: Push and verify the public NuGet downloads
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push "release/SimdFace.$RELEASE_VERSION.nupkg" \
+            --source https://api.nuget.org/v3/index.json --api-key "$NUGET_API_KEY" --skip-duplicate
+          python3 tools/verify-nuget-release.py release "$RELEASE_VERSION"
+
+  github-release:
+    needs: [build, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: nuget-${{ needs.build.outputs.version }}
+          path: release
+      - name: Publish GitHub Release and its verified package assets
+        run: |
+          tag="v$RELEASE_VERSION"
+          (cd release && sha256sum -c SHA256SUMS.txt)
+          if ! draft=$(gh release view "$tag" --json isDraft --jq '.isDraft'); then
+            gh release create "$tag" --verify-tag --draft --title "SimdFace $RELEASE_VERSION" --notes-file "docs/releases/$tag.md"
+            draft=true
+          fi
+          if [ "$draft" = true ]; then
+            gh release upload "$tag" release/*.nupkg release/SHA256SUMS.txt --clobber
+            gh release edit "$tag" --draft=false --latest
+          fi
+          gh release download "$tag" --pattern '*.nupkg' --dir "$RUNNER_TEMP/github-release"
+          for package in release/*.nupkg; do
+            cmp "$package" "$RUNNER_TEMP/github-release/${package##*/}"
+          done

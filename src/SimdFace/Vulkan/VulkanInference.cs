@@ -3,7 +3,7 @@ using SimdFace.Vulkan;
 
 namespace SimdFace;
 
-/// <summary>A reusable Vulkan device for YuNet and SFace inference. Dispose it after both models finish.</summary>
+/// <summary>供 YuNet 和 SFace 复用的 Vulkan 推理设备。所有引用该设备的模型停止推理后可释放设备。</summary>
 public sealed unsafe class VulkanInference : IDisposable
 {
     private const uint ComputeShader = 0x20;
@@ -25,8 +25,10 @@ public sealed unsafe class VulkanInference : IDisposable
     private Vk.MemoryProperties memoryProperties;
     private bool disposed;
 
+    /// <summary>所选 Vulkan 物理设备报告的名称。</summary>
     public string DeviceName { get; } = "";
 
+    /// <summary>选择 Vulkan 计算设备并初始化推理资源。</summary>
     public VulkanInference()
     {
         try
@@ -374,6 +376,7 @@ public sealed unsafe class VulkanInference : IDisposable
             throw new InvalidOperationException($"Vulkan failed to {operation} (VkResult {result}).");
     }
 
+    /// <summary>释放此设备及其拥有的推理资源。</summary>
     public void Dispose()
     {
         lock (gate)

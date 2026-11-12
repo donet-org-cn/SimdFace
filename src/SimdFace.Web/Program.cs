@@ -31,13 +31,17 @@ var gpu = new Lazy<VulkanModels>(() =>
     }
 });
 using var inferenceSlot = new SemaphoreSlim(1);
+var camera = new CameraVerification(detector, recognizer, gpu, modelDirectory);
 
 var app = builder.Build();
 using var browserFiles = OpenBrowserAssets(builder.Configuration["SimdFace:BrowserAssets"], app.Environment.ContentRootPath);
+var types = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
+types.Mappings[".cer"] = "application/x-x509-ca-cert";
+var staticFiles = new StaticFileOptions { ContentTypeProvider = types };
 if (browserFiles is null)
 {
     app.UseDefaultFiles();
-    app.UseStaticFiles();
+    app.UseStaticFiles(staticFiles);
 }
 else
 {
@@ -48,16 +52,26 @@ else
         await context.Response.WriteAsync("export const server = true;", context.RequestAborted);
     }));
     app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = browserFiles });
-    var types = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
     types.Mappings[".mjs"] = "text/javascript";
     types.Mappings[".wasm"] = "application/wasm";
     types.Mappings[".onnx"] = "application/octet-stream";
     app.UseStaticFiles(new StaticFileOptions { FileProvider = browserFiles, ContentTypeProvider = types });
+    app.UseStaticFiles(staticFiles);
 }
 app.MapPost("/api/detect", (HttpRequest request) => Analyze(request, PhotoMode.Detect));
 app.MapPost("/api/compare", (HttpRequest request) => Analyze(request, PhotoMode.Compare));
 app.MapPost("/api/extract", (HttpRequest request) => Analyze(request, PhotoMode.Extract));
 app.MapPost("/api/vectors", CompareVectors);
+app.MapPost("/api/camera/start", (HttpRequest request) => CameraRequest(request, null));
+app.MapPost("/api/camera/{id}/frame", (HttpRequest request, string id) => CameraRequest(request, id));
+app.MapPost("/api/camera/{id}/cancel", async (HttpRequest request, string id) =>
+{
+    if (request.Headers["X-SimdFace-Request"] != "1")
+        return Results.BadRequest(new { Message = "缺少请求标记。" });
+    await inferenceSlot.WaitAsync(request.HttpContext.RequestAborted);
+    try { return camera.Cancel(id); }
+    finally { inferenceSlot.Release(); }
+});
 try
 {
     app.Run();
@@ -66,6 +80,58 @@ finally
 {
     if (gpu.IsValueCreated)
         gpu.Value.Device.Dispose();
+}
+
+async Task<IResult> CameraRequest(HttpRequest request, string? id)
+{
+    if (request.Headers["X-SimdFace-Request"] != "1")
+        return Results.BadRequest(new { Message = "缺少请求标记。" });
+
+    var address = request.HttpContext.Connection.RemoteIpAddress;
+    if (address?.IsIPv4MappedToIPv6 == true)
+        address = address.MapToIPv4();
+    if (!request.IsHttps && (address is null || !System.Net.IPAddress.IsLoopback(address)))
+        return Results.BadRequest(new { Message = "请通过 HTTPS 进行摄像头核验。" });
+    request.HttpContext.Response.Headers.CacheControl = "no-store";
+
+    bool start = id is null;
+    string backend = request.Query.TryGetValue("backend", out var requested) ? requested.ToString() : "vulkan";
+    if (start && backend is not ("cpu" or "vulkan"))
+        return Results.BadRequest(new { Message = "请选择 CPU 或 Vulkan。" });
+
+    int fileLimit = start ? maxFileBytes : CameraVerification.FrameBytes;
+    var bodyLimit = request.HttpContext.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+    if (bodyLimit is { IsReadOnly: false })
+        bodyLimit.MaxRequestBodySize = fileLimit + 8192;
+    var cancellation = request.HttpContext.RequestAborted;
+    try
+    {
+        var files = await ReadFiles(request, 1, fileLimit, cancellation);
+        if (!await inferenceSlot.WaitAsync(0, cancellation))
+            return Results.Json(new { Message = "正在处理上一帧，请稍后重试。" }, statusCode: 429);
+        try
+        {
+            return start ? camera.Start(files[0].Span, backend, cancellation)
+                : camera.Frame(id!, files[0].Span, cancellation);
+        }
+        finally
+        {
+            inferenceSlot.Release();
+        }
+    }
+    catch (BadHttpRequestException error) when (error.StatusCode == 413)
+    {
+        return Results.StatusCode(413);
+    }
+    catch (Exception error) when (error is InvalidDataException or ArgumentException or NotSupportedException)
+    {
+        return Results.BadRequest(new { Message = error.Message });
+    }
+    catch (Exception error) when (error is IOException or InvalidOperationException)
+    {
+        app.Logger.LogError(error, "Camera verification failed.");
+        return Results.Json(new { Message = "摄像头核验服务暂时不可用，请检查模型文件和推理设备。" }, statusCode: 503);
+    }
 }
 
 async Task<IResult> Analyze(HttpRequest request, PhotoMode mode)
