@@ -1,8 +1,24 @@
 using SimdFace;
 
-if (args is not [_] and not [_, "--vulkan"])
-    throw new ArgumentException("Usage: NuGetPackageConsumer <model-directory> [--vulkan]");
+if (args is not [_] and not [_, "--vulkan"] and not [_, "--expect-no-vulkan-hardware"])
+    throw new ArgumentException("Usage: NuGetPackageConsumer <model-directory> [--vulkan | --expect-no-vulkan-hardware]");
 string modelDirectory = args[0];
+
+if (args is [_, "--expect-no-vulkan-hardware"])
+{
+    // 软件设备可以被 Vulkan loader 枚举，SimdFace 应将其排除在硬件加速路径之外。
+    try
+    {
+        using var softwareDevice = new VulkanInference();
+    }
+    catch (NotSupportedException error) when (error.Message.StartsWith("No hardware Vulkan device", StringComparison.Ordinal))
+    {
+        Console.WriteLine("SimdFace package correctly rejected software-only Vulkan.");
+        return;
+    }
+
+    throw new InvalidOperationException("Software-only Vulkan was accepted as a hardware device.");
+}
 
 using var vulkan = args.Length == 2 ? new VulkanInference() : null;
 string ModelPath(string file) => Path.Combine(modelDirectory, file);

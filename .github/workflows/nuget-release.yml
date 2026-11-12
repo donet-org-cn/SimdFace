@@ -37,6 +37,12 @@ jobs:
         with:
           ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
           persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-ci
+          sparse-checkout: tools/NuGetPackageConsumer
+          persist-credentials: false
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
@@ -66,20 +72,20 @@ jobs:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           dotnet pack src/SimdFace -c Release --no-build -o release
-          consumer=tools/NuGetPackageConsumer
+          consumer=release-ci/tools/NuGetPackageConsumer
           dotnet restore "$consumer" --source "$PWD/release" --packages "$RUNNER_TEMP/simdface-packages" \
             -p:PackageVersionUnderTest="$RELEASE_VERSION"
           dotnet build "$consumer" -c Release --no-restore -p:PackageVersionUnderTest="$RELEASE_VERSION"
           dotnet "$consumer/bin/Release/net10.0/NuGetPackageConsumer.dll" models
           test -s "$RUNNER_TEMP/simdface-packages/simdface/$RELEASE_VERSION/lib/net10.0/SimdFace.xml"
           (cd release && sha256sum "SimdFace.$RELEASE_VERSION.nupkg" > SHA256SUMS.txt)
-      - name: Test the packaged Vulkan backend with Mesa's software device
+      - name: Verify the package rejects software-only Vulkan
         run: |
           sudo apt-get update
           sudo apt-get install -y mesa-vulkan-drivers libvulkan1
           export VK_DRIVER_FILES=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
           test -n "$VK_DRIVER_FILES"
-          dotnet tools/NuGetPackageConsumer/bin/Release/net10.0/NuGetPackageConsumer.dll models --vulkan
+          dotnet release-ci/tools/NuGetPackageConsumer/bin/Release/net10.0/NuGetPackageConsumer.dll models --expect-no-vulkan-hardware
       - uses: actions/upload-artifact@v4
         with:
           name: nuget-${{ steps.version.outputs.version }}
@@ -134,7 +140,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.build.outputs.commit }}
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: docs/releases
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
