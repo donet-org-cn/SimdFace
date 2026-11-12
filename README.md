@@ -2,6 +2,8 @@
 
 简体中文 · [English](README.en.md)
 
+[1.1.0 更新说明](docs/releases/v1.1.0.md) · [发布流水线](https://github.com/donet-org-cn/SimdFace/actions/workflows/nuget-release.yml) · [GitHub Releases](https://github.com/donet-org-cn/SimdFace/releases)
+
 SimdFace 是面向 .NET 10 的本地人脸检测与 1:1 比对项目。它用 YuNet 定位人脸和五个关键点，用 SFace 对齐人脸并提取归一化的 128 维特征。你可以在同一个网页切换浏览器 WASM、后端 CPU 和后端 Vulkan GPU，也可以从命令行或 C# 直接调用。
 
 ## 功能

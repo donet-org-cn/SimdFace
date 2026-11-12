@@ -2,6 +2,8 @@
 
 [简体中文](README.md) · English
 
+[1.1.0 release notes](docs/releases/v1.1.0.md) · [Release workflow](https://github.com/donet-org-cn/SimdFace/actions/workflows/nuget-release.yml) · [GitHub Releases](https://github.com/donet-org-cn/SimdFace/releases)
+
 SimdFace is a local face detection and 1:1 verification project for .NET 10. It uses YuNet to locate faces and five facial landmarks, then aligns each face and extracts a normalized 128-dimensional SFace embedding. Run the same workflow in a browser, on a server CPU or Vulkan GPU, from the command line, or directly in C#.
 
 ## Features

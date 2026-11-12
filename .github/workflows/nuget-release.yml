@@ -4,12 +4,17 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing stable tag to publish (for example, v1.1.0). Leave blank to validate only.
+        type: string
+        required: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: nuget-release-${{ github.ref }}
+  group: nuget-release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -18,9 +23,19 @@ jobs:
     timeout-minutes: 30
     outputs:
       version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.version.outputs.commit }}
     steps:
+      - name: Validate requested release tag
+        if: inputs.release_tag != ''
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/main"
+          [[ "$REQUESTED_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
           persist-credentials: false
       - uses: actions/setup-dotnet@v4
         with:
@@ -28,13 +43,20 @@ jobs:
       - name: Validate package version
         id: version
         shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
           version=$(dotnet msbuild src/SimdFace -getProperty:PackageVersion)
           [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          if [ "$GITHUB_REF_TYPE" = tag ]; then test "$GITHUB_REF_NAME" = "v$version"; fi
+          if [ -n "$REQUESTED_TAG" ]; then
+            test "$REQUESTED_TAG" = "v$version"
+          elif [ "$GITHUB_REF_TYPE" = tag ]; then
+            test "$GITHUB_REF_NAME" = "v$version"
+          fi
           test -s "docs/releases/v$version.md"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Restore and build
         run: |
           dotnet restore SimdFace.slnx --locked-mode
@@ -65,7 +87,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push'
+    if: (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -78,6 +100,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.build.outputs.commit }}
           persist-credentials: false
       - uses: actions/setup-dotnet@v4
         with:
@@ -111,6 +134,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.build.outputs.commit }}
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
